@@ -23,8 +23,12 @@ from .sources import Skill
 
 _WORD = re.compile(r"[^\W_]+")
 _RRF_K = 60
-# Bump when the table layout changes; a mismatch drops and recreates the (cache-only) index.
+# Bump when the table layout or stored formats change. The version names the file
+# (skills-v<N>.sqlite), so two plugin versions never rebuild each other's index; a stale
+# user_version inside a file still drops and recreates the (cache-only) tables.
 _SCHEMA_VERSION = 4
+_INDEX_FILE = re.compile(r"skills(?:-v(\d+))?\.sqlite")
+_SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
 _COLUMNS = "invoke, name, description, source, plugin_id, path, tags_json"
 
 _SCHEMA = """
@@ -108,8 +112,22 @@ def required_matches(n_terms: int) -> int:
 
 
 def index_path(data: Path) -> Path:
-    """Where the index lives inside the data directory."""
-    return Path(data) / "index" / "skills.sqlite"
+    """Where this schema version's index lives inside the data directory."""
+    return Path(data) / "index" / f"skills-v{_SCHEMA_VERSION}.sqlite"
+
+
+def remove_older_indexes(index_dir: Path) -> None:
+    """Delete index files of older schema versions (and the unversioned skills.sqlite), with their
+    side files. Newer versions belong to another plugin version and are left alone."""
+    try:
+        names = [p.name for p in Path(index_dir).iterdir()]
+    except FileNotFoundError:
+        return
+    for name in names:
+        match = _INDEX_FILE.fullmatch(name)
+        if match and (match.group(1) is None or int(match.group(1)) < _SCHEMA_VERSION):
+            for suffix in ("",) + _SIDE_SUFFIXES:
+                (Path(index_dir) / (name + suffix)).unlink(missing_ok=True)
 
 
 def is_corruption(exc: BaseException) -> bool:
@@ -158,7 +176,7 @@ class SkillIndex:
 
     def reset(self) -> None:
         """Delete the database and its WAL, shared-memory and rollback-journal files."""
-        for suffix in ("", "-wal", "-shm", "-journal"):
+        for suffix in ("",) + _SIDE_SUFFIXES:
             self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
 
     def _connect(self) -> sqlite3.Connection:
@@ -370,22 +388,27 @@ class SkillIndex:
         self,
         allow: Callable[[Skill, str], bool] = lambda skill, segment: True,
         override_segment: str | None = None,
+        segments: tuple[str, ...] | None = None,
     ) -> list[Skill]:
-        """Every skill passing `allow`, sorted by invoke. Rows of other segments whose invoke is
-        also (allowed) in `override_segment` are shadowed. One read snapshot."""
+        """Every skill passing `allow`, sorted by invoke (then segment). Rows of other segments
+        whose invoke is also (allowed) in `override_segment` are shadowed. With `segments`, only
+        those segments (plus `override_segment`, for shadowing) are read and returned from.
+        One query in one read snapshot; each row is decoded once."""
+        where, params = "", ()
+        if segments is not None:
+            wanted = tuple(dict.fromkeys(segments + ((override_segment,) if override_segment else ())))
+            where = f"WHERE segment IN ({', '.join('?' for _ in wanted)})"
+            params = wanted
         with closing(self._connect()) as conn:
-            conn.execute("BEGIN")
-            try:
-                shadowed = self._shadowed(conn, allow, override_segment)
-                rows = conn.execute(f"SELECT {_COLUMNS}, segment FROM skills").fetchall()
-            finally:
-                conn.execute("COMMIT")
-        skills = [
-            _row_to_skill(r[:-1]) for r in rows
-            if allow(_row_to_skill(r[:-1]), r[-1])
-            and (r[-1] == override_segment or r[0] not in shadowed)
+            rows = conn.execute(f"SELECT {_COLUMNS}, segment FROM skills {where}", params).fetchall()
+        allowed = [(skill, r[-1]) for r in rows for skill in (_row_to_skill(r[:-1]),) if allow(skill, r[-1])]
+        shadowed = {skill.invoke for skill, segment in allowed if segment == override_segment}
+        kept = [
+            (skill, segment) for skill, segment in allowed
+            if (segments is None or segment in segments)
+            and (segment == override_segment or skill.invoke not in shadowed)
         ]
-        return sorted(skills, key=lambda s: s.invoke)
+        return [skill for skill, _ in sorted(kept, key=lambda e: (e[0].invoke, e[1]))]
 
     def search(
         self,

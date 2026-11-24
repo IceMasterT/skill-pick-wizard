@@ -39,6 +39,7 @@ def build_context(
         job = json.dumps(_one_line(session.job), ensure_ascii=False)
         lines.append(
             "Invoke each skill with the Skill tool when the work reaches its stage. "
+            "A skill already invoked in this conversation need not be invoked again. "
             f"Use this plan only while the work matches the job {job}. "
             "If the user starts clearly unrelated work, say in one line that /skill-pick "
             "will pick skills for the new job, then continue."

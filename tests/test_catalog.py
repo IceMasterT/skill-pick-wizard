@@ -216,7 +216,7 @@ def test_cli_no_skills_exits_2_and_keeps_chunks(env, capsys):
     assert (out / "chunk-1.md").read_text() == "old"
 
 
-@pytest.mark.parametrize("bad", ["a b", "a`b", "a\nb", "a\x00b", "a\u2028b", ""])
+@pytest.mark.parametrize("bad", ["a b", "a`b", "a\nb", "a\x00b", "a\u2028b", "", "a\u200bb", "a\u202eb", "a\ufeffb"])
 def test_uncopyable_invokes_are_omitted(tmp_path, bad):
     with pytest.raises(ValueError):
         format_line(sk(bad))
@@ -235,6 +235,8 @@ def _agent_body():
     [
         "one skill per line",
         "offset",
+        "starting at offset 1 (the first line)",
+        "advancing the offset by 100",
         "limit of 100",
         "fewer than 100 lines",
         "before answering",
@@ -246,3 +248,16 @@ def _agent_body():
 )
 def test_agent_prompt_contract(needle):
     assert needle in _agent_body()
+
+
+def test_long_descriptions_are_capped_so_lines_fit_a_read(tmp_path):
+    from skillpick.catalog import MAX_DESCRIPTION
+    assert MAX_DESCRIPTION == 1500
+    long = "word " * 1000  # 5000 characters
+    exact = "y" * MAX_DESCRIPTION
+    [path] = write_catalog([sk("a", long), sk("b", exact)], tmp_path / "c", 1)
+    a, b = path.read_text().splitlines()
+    desc = a.split("]: ", 1)[1]
+    assert len(desc) == MAX_DESCRIPTION and desc.endswith("...") and desc.startswith("word word")
+    assert b == f"- `b` []: {exact}"  # at the cap: untouched
+    assert len(a) < 2000  # the Read tool truncates longer lines

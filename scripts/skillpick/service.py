@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import TypeVar
 
 from . import vault
-from .index import Hit, SkillIndex, fingerprint, index_path, is_corruption
+from .catalog import copyable
+from .index import Hit, SkillIndex, fingerprint, index_path, is_corruption, remove_older_indexes
 from .paths import project_key
 from .sources import (
     Skill,
@@ -49,6 +50,7 @@ def fresh_index(
 ) -> SkillIndex:
     """The single index, with the global and this project's segments rebuilt when their fingerprints changed."""
     index = SkillIndex(index_path(data))
+    remove_older_indexes(index.db_path.parent)
     vault_dir = _vault_dir(cfg)
     fp = fingerprint(skill_files(claude_home) + vault.skill_files(vault_dir))
     if force or index.stored_fingerprint(GLOBAL) != fp:
@@ -77,12 +79,14 @@ class _View:
         self._enabled = enabled_plugin_ids(claude_home, cwd)
 
     def allow(self, skill: Skill, segment: str) -> bool:
-        if segment not in (GLOBAL, self.project):
+        """This project's segments, enabled plugins only, and only invokes that can be copied
+        exactly from a printed line (so search, catalog and save-plan agree)."""
+        if segment not in (GLOBAL, self.project) or not copyable(skill.invoke):
             return False
         return skill.plugin_id is None or skill.plugin_id in self._enabled
 
     def skills(self) -> list[Skill]:
-        return self.index.visible(self.allow, self.project)
+        return self.index.visible(self.allow, self.project, segments=(GLOBAL, self.project))
 
 
 def _with_view(claude_home: Path, cwd: Path, data: Path, cfg: Config, op: Callable[[_View], T],

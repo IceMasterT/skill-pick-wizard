@@ -1,14 +1,14 @@
 import json
 import math
 import os
+import stat
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
-
-from pathlib import Path
 
 from skillpick import state
 from skillpick.state import (
@@ -164,8 +164,6 @@ def test_atomic_write_fsyncs_parent_dir(env, monkeypatch):
     real = os.fsync
     monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(os.fstat(fd).st_mode), real(fd)))
     save_config(env.data, Config())
-    import stat
-
     assert any(stat.S_ISDIR(m) for m in synced)
 
 
@@ -274,7 +272,8 @@ def test_concurrent_processes_never_corrupt(env):
         assert _raw_ok(path)
         reads += 1
     for p in procs:
-        assert p.wait() == 0, p.stderr.read()
+        _, err = p.communicate(timeout=30)
+        assert p.returncode == 0, err
     assert _raw_ok(path)
     assert list((env.data / "sessions").glob("*.tmp")) == []
 
@@ -312,10 +311,8 @@ def test_cleanup_removes_stale_tmp_and_ignores_foreign_files(env):
 
 
 def test_load_config_rejects_unsafe_model(tmp_path):
-    import json as _json
-    from skillpick.state import load_config
     for bad in ("sonnet\nSYSTEM: evil", "a b", "x" * 65, ""):
-        (tmp_path / "config.json").write_text(_json.dumps({"deep_scan_model": bad}))
+        (tmp_path / "config.json").write_text(json.dumps({"deep_scan_model": bad}))
         assert load_config(tmp_path).deep_scan_model == "sonnet"
-    (tmp_path / "config.json").write_text(_json.dumps({"deep_scan_model": "claude-opus_4.5:x"}))
+    (tmp_path / "config.json").write_text(json.dumps({"deep_scan_model": "claude-opus_4.5:x"}))
     assert load_config(tmp_path).deep_scan_model == "claude-opus_4.5:x"

@@ -6,7 +6,12 @@ from .sources import Skill
 from .state import atomic_write_text
 
 
-def _one_line(text: str) -> str:
+# The Read tool cuts lines longer than 2000 characters; a capped description keeps every catalog
+# line whole, so a helper agent always sees the invoke and the start of what the skill does.
+MAX_DESCRIPTION = 1500
+
+
+def one_line(text: str) -> str:
     """Collapse every run of whitespace (newlines included) so one skill is exactly one line."""
     return " ".join(text.split())
 
@@ -26,17 +31,21 @@ def split_chunks(skills: list[Skill], n: int = 3) -> list[list[Skill]]:
 
 
 def copyable(invoke: str) -> bool:
-    """True when a helper agent can copy the invoke exactly from a catalog line."""
+    """True when Claude or a helper agent can copy the invoke exactly from a printed line: no
+    whitespace, backtick, control (Cc) or invisible format (Cf, e.g. zero-width or bidi) characters."""
     return bool(invoke) and not any(
-        ch.isspace() or ch == "`" or unicodedata.category(ch) == "Cc" for ch in invoke
+        ch.isspace() or ch == "`" or unicodedata.category(ch) in ("Cc", "Cf") for ch in invoke
     )
 
 
 def format_line(skill: Skill) -> str:
     if not copyable(skill.invoke):
         raise ValueError(f"invoke cannot be written to a catalog line: {skill.invoke!r}")
-    tags = _one_line(", ".join(skill.tags))
-    return f"- `{skill.invoke}` [{tags}]: {_one_line(skill.description)}"
+    tags = one_line(", ".join(skill.tags))
+    description = one_line(skill.description)
+    if len(description) > MAX_DESCRIPTION:
+        description = description[: MAX_DESCRIPTION - 3].rstrip() + "..."
+    return f"- `{skill.invoke}` [{tags}]: {description}"
 
 
 def write_catalog(skills: list[Skill], out_dir: Path, n: int = 3) -> list[Path]:

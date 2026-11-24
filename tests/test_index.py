@@ -1,9 +1,11 @@
 import os
+import sqlite3
 import time
+from contextlib import closing
 
 import pytest
 
-from skillpick.index import SkillIndex, build_fts_query, fingerprint
+from skillpick.index import _SCHEMA_VERSION, SkillIndex, build_fts_query, fingerprint
 from skillpick.sources import Skill
 
 
@@ -273,15 +275,19 @@ def test_search_correct_after_rebuild_on_other_connection(idx):
     assert idx.get("stripe-payments") is None
 
 
+def _db(path):
+    """A connection that is closed (and committed) when the block ends; sqlite3's own context
+    manager only commits."""
+    return closing(sqlite3.connect(path, isolation_level=None))
+
+
 def test_wal_mode_enabled(idx):
-    import sqlite3
-    with sqlite3.connect(idx.db_path) as c:
+    with _db(idx.db_path) as c:
         assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 
 
 def test_fts_is_self_contained(idx):
-    import sqlite3
-    with sqlite3.connect(idx.db_path) as c:
+    with _db(idx.db_path) as c:
         c.execute("INSERT INTO fts(fts) VALUES('rebuild')")
         c.execute("SELECT highlight(fts, 2, '[', ']') FROM fts WHERE fts MATCH 'stripe'").fetchall()
 
@@ -311,10 +317,16 @@ def test_unicode_search(tmp_path):
     assert invokes(i.search(["café"])) == ["cafe-menu"]
 
 
+def test_fresh_database_gets_the_current_schema_version(tmp_path):
+    db = tmp_path / "new.db"
+    assert SkillIndex(db).count() == 0
+    with _db(db) as c:
+        assert c.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
+
+
 def test_stale_schema_is_recreated(tmp_path):
-    import sqlite3
     db = tmp_path / "old.db"
-    with sqlite3.connect(db) as c:
+    with _db(db) as c:
         c.execute("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)")
         c.execute("INSERT INTO meta VALUES ('fingerprint', 'stale')")
         c.execute("CREATE TABLE skills(rowid INTEGER PRIMARY KEY, invoke TEXT UNIQUE)")
@@ -326,8 +338,8 @@ def test_stale_schema_is_recreated(tmp_path):
     i.replace_segment("global", SKILLS, "new")
     assert i.get("stripe-payments").tags == ()
     assert invokes(i.search(["stripe"])) == ["stripe-payments"]
-    with sqlite3.connect(db) as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] != 1
+    with _db(db) as c:
+        assert c.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
 
 
 def test_segments_are_independent(tmp_path):
@@ -449,7 +461,6 @@ def test_replace_segment_records_usage_and_metadataless_project_segment_pruned(t
 
 
 def test_prune_takes_no_write_lock_when_nothing_stale(tmp_path):
-    import sqlite3
     i = SkillIndex(tmp_path / "n3.db")
     i.replace_segment("project:a", [_skill("a1", "x")], "f", path="/p", now=1_000_000.0)
     checked = []
@@ -493,7 +504,6 @@ def test_reset_deletes_the_database_and_its_side_files(idx):
 
 
 def test_is_corruption_only_for_corrupt_files(tmp_path):
-    import sqlite3
     from skillpick.index import is_corruption
     db = tmp_path / "junk.db"
     db.write_bytes(os.urandom(4096))
@@ -502,3 +512,17 @@ def test_is_corruption_only_for_corrupt_files(tmp_path):
     assert is_corruption(info.value)
     assert not is_corruption(sqlite3.OperationalError("database is locked"))
     assert not is_corruption(sqlite3.IntegrityError("UNIQUE constraint failed"))
+
+
+def test_visible_reads_only_the_given_segments_and_decodes_each_row_once(tmp_path, monkeypatch):
+    from skillpick import index as index_mod
+    i = SkillIndex(tmp_path / "v.db")
+    i.replace_segment("global", [_skill("dup", "g"), _skill("g-only", "g")], "f")
+    i.replace_segment("project:a", [_skill("dup", "a")], "f")
+    i.replace_segment("project:b", [_skill("b-only", "b")], "f")
+    decoded = []
+    real = index_mod._row_to_skill
+    monkeypatch.setattr(index_mod, "_row_to_skill", lambda row: (decoded.append(row[0]), real(row))[1])
+    got = i.visible(override_segment="project:a", segments=("global", "project:a"))
+    assert [(s.invoke, s.description) for s in got] == [("dup", "a"), ("g-only", "g")]
+    assert sorted(decoded) == ["dup", "dup", "g-only"]

@@ -52,6 +52,7 @@ def test_planned_session_injects_reminder_only():
     assert "scan pending" not in text
     assert "/skill-pick" in text
     assert 'the job "build a thing"' in text
+    assert "A skill already invoked in this conversation need not be invoked again." in text
 
 
 def test_skipped_session_silent():
@@ -262,6 +263,21 @@ def test_hook_survives_broken_import(env, tmp_path):
                        input='{"session_id":"s1","prompt":"x"}',
                        capture_output=True, text=True)
     assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
+    log = (env.data / "errors.log").read_text(encoding="utf-8")
+    assert "hook: import failed" in log and "RuntimeError: broken" in log
+
+
+def test_hook_import_failure_logs_even_when_paths_is_broken(env, tmp_path):
+    import shutil
+    scripts = tmp_path / "scripts_copy"
+    shutil.copytree(REPO / "scripts", scripts, ignore=shutil.ignore_patterns("__pycache__"))
+    (scripts / "skillpick" / "paths.py").write_text("raise ImportError('no paths')\n")
+    for _ in range(2):
+        r = subprocess.run([sys.executable, str(scripts / "hook.py")],
+                           input='{"session_id":"s1","prompt":"x"}', capture_output=True, text=True)
+        assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
+    log = (env.data / "errors.log").read_text(encoding="utf-8")
+    assert log.count("hook: import failed") == 2 and "ImportError: no paths" in log
 
 
 def test_hook_closed_stdout_pipe(env):
@@ -278,3 +294,59 @@ def test_hook_stdout_fd_closed(env):
         input=b'{"session_id":"s1","prompt":"x"}', capture_output=True,
     )
     assert r.returncode == 0
+
+
+_LOG_WRITER = """
+import os, sys, time
+from pathlib import Path
+from skillpick.paths import append_error_log
+_replace = os.replace
+os.replace = lambda a, b: (time.sleep(0.05), _replace(a, b))[1]  # widen the size-check/rotate window
+data, n, go = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+while not go.exists():
+    time.sleep(0.001)
+append_error_log(data, f"line-{n}\\n")
+"""
+
+
+def test_errors_log_rotation_is_safe_across_processes(env):
+    """Many processes past the size limit at once: one rotation, the old log kept, no line lost."""
+    env.data.mkdir(parents=True, exist_ok=True)
+    big = "x" * (1024 * 1024 + 1)
+    (env.data / "errors.log").write_text(big, encoding="utf-8")
+    go = env.data / "go"
+    procs = [
+        subprocess.Popen([sys.executable, "-c", _LOG_WRITER, str(env.data), str(n), str(go)],
+                         env={**__import__("os").environ, "PYTHONPATH": str(REPO / "scripts")},
+                         stderr=subprocess.PIPE)
+        for n in range(16)
+    ]
+    time.sleep(0.5)
+    go.touch()
+    for p in procs:
+        _, err = p.communicate(timeout=30)
+        assert p.returncode == 0, err
+    assert (env.data / "errors.log.1").read_text(encoding="utf-8") == big
+    lines = (env.data / "errors.log").read_text(encoding="utf-8").splitlines()
+    assert sorted(lines) == sorted(f"line-{n}" for n in range(16))
+
+
+def test_errors_log_accepts_text_that_is_not_utf8(env):
+    from skillpick.paths import append_error_log
+    env.data.mkdir(parents=True, exist_ok=True)
+    append_error_log(env.data, "path /x/bad\udcff here\n")
+    assert (env.data / "errors.log").read_text(encoding="utf-8") == "path /x/bad\\udcff here\n"
+
+
+@pytest.mark.parametrize("override", [True, False])
+def test_fallback_log_matches_paths(env, monkeypatch, override):
+    from skillpick import paths
+    if not override:
+        monkeypatch.delenv("SKILL_PICK_WIZARD_HOME")
+    assert hook._fallback_data_dir() == paths.data_dir()
+    assert hook._LOG_MAX_BYTES == paths.ERROR_LOG_MAX_BYTES
+    log = paths.data_dir() / "errors.log"
+    log.write_text("x" * (paths.ERROR_LOG_MAX_BYTES + 1), encoding="utf-8")
+    hook._fallback_log("bad \udcff\n")
+    assert log.read_text(encoding="utf-8") == "bad \\udcff\n"
+    assert (log.parent / "errors.log.1").stat().st_size == paths.ERROR_LOG_MAX_BYTES + 1

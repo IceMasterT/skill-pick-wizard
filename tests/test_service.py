@@ -307,3 +307,21 @@ def test_locked_index_is_never_deleted(env, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         service.search(env.claude_home, env.cwd, env.data, cfg, ["wizard"])
     assert db.read_bytes() == before
+
+
+def test_index_file_is_named_by_schema_version_and_older_ones_are_removed(env):
+    from skillpick.index import _SCHEMA_VERSION
+    make_skill(env.claude_home / "skills", "alpha", "description: wizard magic spells")
+    index_dir = env.data / "index"
+    index_dir.mkdir(parents=True)
+    older = ["skills.sqlite", f"skills-v{_SCHEMA_VERSION - 1}.sqlite", "skills-v1.sqlite"]
+    old_files = [index_dir / (name + suffix) for name in older for suffix in ("", "-wal", "-shm", "-journal")]
+    newer = [index_dir / f"skills-v{_SCHEMA_VERSION + 1}.sqlite", index_dir / f"skills-v{_SCHEMA_VERSION + 1}.sqlite-wal"]
+    foreign = [index_dir / "notes.txt", index_dir / "skills-vX.sqlite"]
+    for f in old_files + newer + foreign:
+        f.write_bytes(b"x")
+    db = service.fresh_index(env.claude_home, env.cwd, env.data, cfg_for(env)).db_path
+    assert db == index_dir / f"skills-v{_SCHEMA_VERSION}.sqlite"
+    assert not any(f.exists() for f in old_files)
+    assert all(f.exists() for f in newer + foreign)  # another plugin version's index is left alone
+    assert invokes(service.search(env.claude_home, env.cwd, env.data, cfg_for(env), ["wizard"])) == ["alpha"]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import traceback
@@ -17,8 +18,40 @@ try:  # an import failure must never make the hook exit non-zero
     from skillpick.paths import append_error_log, data_dir
     from skillpick.state import cleanup_sessions, load_config, load_session, valid_session_id
     _IMPORTS_OK = True
+    _IMPORT_ERROR = ""
 except BaseException:
     _IMPORTS_OK = False
+    _IMPORT_ERROR = "".join(traceback.format_exc().splitlines(keepends=True)[-6:])
+
+# Standard-library-only copies of paths.data_dir() and paths.append_error_log(), used only when the
+# skillpick package itself cannot be imported (tests keep them in step with paths.py).
+_LOG_MAX_BYTES = 1024 * 1024
+
+
+def _fallback_data_dir() -> Path:
+    override = os.environ.get("SKILL_PICK_WIZARD_HOME")
+    return Path(override) if override else Path.home() / ".local" / "share" / "skill-pick-wizard"
+
+
+def _fallback_log(text: str) -> None:
+    """Append text to errors.log without the skillpick package; never raises."""
+    try:
+        import fcntl
+
+        data = _fallback_data_dir()
+        data.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log = data / "errors.log"
+        with open(data / "errors.log.lock", "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                if log.stat().st_size > _LOG_MAX_BYTES:
+                    os.replace(log, log.with_name("errors.log.1"))
+            except FileNotFoundError:
+                pass
+            with open(log, "a", encoding="utf-8", errors="backslashreplace") as fh:
+                fh.write(text)
+    except BaseException:
+        pass
 
 
 def _log_error(data: Path | None) -> None:
@@ -48,6 +81,7 @@ def _maybe_cleanup(data: Path) -> None:
 
 def main(stdin_text: str) -> str:
     if not _IMPORTS_OK:
+        _fallback_log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} hook: import failed: {_IMPORT_ERROR}")
         return ""
     data = None
     try:
@@ -79,8 +113,6 @@ def _emit(out: str) -> None:
         sys.stdout.flush()
     except BaseException:
         try:
-            import os
-
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, 1)
         except BaseException:

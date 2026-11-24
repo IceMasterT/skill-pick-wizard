@@ -104,8 +104,10 @@ def cmd_search(args) -> None:
         return
     for hit in hits:
         s = hit.skill
-        print(f"`{s.invoke}`  [{', '.join(s.tags)}]  (matched: {'; '.join(hit.queries)})")
-        print(f"    {s.description}")
+        tags = catalog.one_line(", ".join(s.tags))
+        matched = catalog.one_line("; ".join(hit.queries))
+        print(f"`{s.invoke}`  [{tags}]  (matched: {matched})")
+        print(f"    {catalog.one_line(s.description)}")
 
 
 def _parse_plan(raw: str) -> list[Stage]:
