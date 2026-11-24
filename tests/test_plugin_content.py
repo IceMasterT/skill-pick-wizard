@@ -300,3 +300,70 @@ def test_hook_wording_matches_skill_name():
     match = re.search(r"Invoke the (\S+) skill", text)
     assert match
     assert match.group(1) == f"{_plugin_name()}:" + parse_frontmatter(_read(SKILL))["name"]
+
+
+def _section(text: str, start: str, end: str | None = None) -> str:
+    """Text from the first `start` up to the next `end` after it (or to the end of the text)."""
+    i = text.index(start)
+    j = text.index(end, i + len(start)) if end else len(text)
+    return text[i:j]
+
+
+def test_cli_error_prefixes_the_save_step_handles(env, capsys):
+    """The save step reacts to these exact stderr prefixes, so pin them against the real CLI."""
+    base = ["save-plan", "--session", "s1", "--cwd", str(env.cwd), "--job", "j"]
+    assert pick.main(base + ["--plan", '{"stage": "x"}']) == 2
+    assert capsys.readouterr().err.startswith("invalid --plan")
+    assert pick.main(base + ["--plan", '[{"stage": "A", "skills": ["no-such-skill"]}]']) == 2
+    assert capsys.readouterr().err.startswith("unknown skills: no-such-skill")
+    save = _section(_read(SKILL), "## 6. Save", "## 7.")
+    assert "`invalid --plan`" in save and "`unknown skills: <list>`" in save
+
+
+def test_fixable_save_errors_are_retried_before_any_skip():
+    save = _section(_read(SKILL), "## 6. Save", "## 7.")
+    first_skip_after_save = save.index("<pick> skip", save.index("<pick> save-plan"))
+    for error in ("`unknown skills: <list>`", "`invalid --plan`"):
+        at = save.index(error)
+        retry = save.index("`save-plan` again", at)
+        assert at < retry < first_skip_after_save, error
+    assert "at most twice" in save
+
+
+def test_unsaved_plan_path_is_explicit():
+    save = _section(_read(SKILL), "## 6. Save", "## 7.")
+    assert "/skill-pick to try again" in save  # reminders will not appear; how to retry
+    assert "If `<pick> skip` fails too" in save
+    assert re.search(r"In silent mode, also show the list once", save)
+    start = _section(_read(SKILL), "## 7.")
+    assert "On later messages the hook shows the plan as a reminder" not in start
+    assert "If the plan was saved" in start and "not saved" in start
+
+
+def test_approve_handoff_names_all_three_endings():
+    bullet = next(l for l in _read(SKILL).splitlines() if l.startswith("- **approve:**"))
+    assert "step 6" in bullet
+    assert "without a plan" in bullet
+    assert re.search(r"declined.*save nothing.*start nothing.*wait", bullet)
+    assert "three" in _section(_read(APPROVE), "After every swap", "## Swap")
+
+
+def test_swap_can_drop_a_skill():
+    approve = _read(APPROVE)
+    main = next(q for q in _questions(approve) if q[0] == "Use these skills for this job?")
+    assert "drop" in next(o for o in main[2] if "`Swap one`" in o)
+    replace = _section(approve, "**Ask** `Replace <invoke> with?`", "\n4. ")
+    assert re.search(r'"Other".*(remove|drop)', replace, re.S)
+    assert replace.count("drop") >= 2  # the Other rule and the no-alternatives notice
+
+
+def test_which_stage_handles_typed_text():
+    stage = _section(_read(APPROVE), "**Ask** `Which stage?`", "\n2. ")
+    assert '"Other"' in stage and "any stage" in stage
+
+
+def test_add_respects_the_pick_limits():
+    add = _section(_read(APPROVE), "## Add", "## Typed text")
+    assert "8 skills" in add and "4 skills" in add and "Which skill should be replaced?" in add
+    other = _section(_read(APPROVE), '**Text typed in "Other":**', "After every swap")
+    assert "SKILL.md step 4.1" in other

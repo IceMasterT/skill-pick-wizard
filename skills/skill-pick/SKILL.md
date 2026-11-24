@@ -91,9 +91,9 @@ Skills for: "<job summary>"
 
 Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<job summary>" (deep scan)`.
 
-- **silent:** show nothing except the one-line notices from steps 3 and 6. Go to step 6.
+- **silent:** show nothing except the one-line notices from steps 3 and 6, and the list only if step 6.7 needs it. Go to step 6.
 - **show:** show the list, then go straight to step 6 without asking.
-- **approve:** show the list, then Read `<base directory>/approve.md` with the Read tool and follow it. It ends either at step 6 with the approved list, or with the job started without a plan.
+- **approve:** show the list, then Read `<base directory>/approve.md` with the Read tool and follow it. It ends in one of three ways: at step 6 with the approved list (saved with `--mode show` if the question tool was unavailable); with the job done without a plan (the user chose Skip; steps 6 and 7 do not apply); or stopped because the user declined a question (save nothing, start nothing, wait for the user's next message).
 
 ## 6. Save
 
@@ -113,7 +113,13 @@ Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<
    `<mode used>` is `approve`, `show` or `silent`. Add `--deep-scan` when the deep scan ran.
 4. It prints `saved plan: <n> stages` on success.
 5. If it prints `unknown skills: <list>`, replace each listed skill with an alternative of the same stage that came from the search output (those are always known), or drop it, and run `save-plan` again. Tell the user in one line only if the approved list changed.
-6. On any other error, run `<pick> skip` so the hook does not start this flow again on every message, say in one line that the plan could not be saved and why, and still do step 7 with the final list.
+6. If it prints an error starting with `invalid --plan`, rebuild the JSON to the shape in item 2 (a non-empty list; each item has a non-empty `"stage"` string and a non-empty `"skills"` list of strings), check the quoting, and run `save-plan` again.
+7. Retry at most twice in total (items 5 and 6 together). If it still fails, or it fails with any other error, the plan is not saved:
+   1. Run `<pick> skip`, so the hook does not start a new skill scan on every message.
+   2. If the skip worked, say in one line: `Skill plan not saved (<error>). Later messages will not show it as a reminder; run /skill-pick to try again.`
+   3. If `<pick> skip` fails too, say in one line: `Skill plan not saved (<error>). Skill picking may start again on your next message.`
+   4. In silent mode, also show the list once (step 5 format), so the plan stays in this conversation.
+   5. Go on to step 7 with the final list.
 
 ## 7. Start the job
 
@@ -121,4 +127,4 @@ Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<
 2. Do the job. When the work reaches a later stage, invoke that stage's skills with the Skill tool before doing its work. Do not invoke later stages' skills up front.
 3. Invoke every planned skill when its stage starts, even if the work looks simple. Once invoked, a skill stays in effect for the rest of the job; you do not need to invoke it again. If a skill's instructions conflict with the user's request, the user's request wins.
 4. If a Skill call fails, say so in one line and carry on with the rest of the plan.
-5. Do not run this flow again for this job. On later messages the hook shows the plan as a reminder; keep following it.
+5. Do not run this flow again for this job on your own. If the plan was saved, the hook shows it as a reminder on later messages. If it was not saved (step 6.7), the list shown in this conversation is the plan. Either way, keep following it until the job is done.

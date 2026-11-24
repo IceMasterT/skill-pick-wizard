@@ -13,7 +13,7 @@ Read this only in approve mode, after showing the list (SKILL.md step 5). `<pick
 
 **Ask** `Use these skills for this job?` (header `Skills`) with these options, in this order:
 - `Approve and start`: Save this plan and start the job
-- `Swap one`: Replace one skill with an alternative
+- `Swap one`: Replace or drop one skill
 - `Add one`: Add a skill by name or by need
 - `Skip for this session`: Do the job without a skill plan
 
@@ -23,9 +23,9 @@ Handle the answer:
 - **Skip for this session:** run `<pick> skip`, say in one line that skill picking is skipped for this session, then do the job without a plan. SKILL.md steps 6 and 7 do not apply.
 - **Swap one:** go to **Swap**.
 - **Add one:** go to **Add**.
-- **Text typed in "Other":** if it approves (for example "yes", "go", "looks good"), treat it as `Approve and start`. If it asks for changes (for example "drop X", "use Y instead of X", "add Z"), apply them, resolving any skill it names with **Typed text**. Otherwise answer it in one line.
+- **Text typed in "Other":** if it approves (for example "yes", "go", "looks good"), treat it as `Approve and start`. If it asks for changes (for example "drop X", "use Y instead of X", "add Z"), apply them, resolving any skill it names with **Typed text**. Additions follow the limits of SKILL.md step 4.1 (at most 8 skills, at most 4 per stage): if one would break them, say so in one line and suggest `Swap one` instead. Otherwise answer it in one line.
 
-After every swap, add or change, and after a one-line answer, show the updated list and ask the main question again. Only `Approve and start`, `Skip for this session` or a declined question ends the loop. Every round waits for the user's answer; never answer for them.
+After every swap, add or change, and after a one-line answer, show the updated list and ask the main question again. The loop has exactly three endings: `Approve and start` (go to SKILL.md step 6), `Skip for this session` (do the job without a plan), or a declined question (save nothing, start nothing, wait for the user's next message). Every round waits for the user's answer; never answer for them.
 
 ## Swap
 
@@ -35,6 +35,8 @@ If the list has no skills, say in one line that there is nothing to swap and ask
 
    **Ask** `Which stage?` (header `Stage`) with these options:
    - Up to 4 stages that have skills (label: the stage, description: its skills)
+
+   Text typed in "Other" names a stage or a skill: match it to any stage in the list, including one not shown as an option, and continue with that stage. If it names a skill in the list instead, that skill is the one to replace: go to step 3. If nothing matches, say so in one line and ask the main question again.
 
 2. Then:
 
@@ -49,19 +51,21 @@ If the list has no skills, say in one line that there is nothing to swap and ask
    - Up to 3 of that stage's alternatives (label: the invoke, description: a short version of what it does)
    - `Keep it`: Leave this skill in the plan
 
-   Text typed in "Other": resolve it with **Typed text**. If the stage has no alternatives left, the only option is `Keep it`, so the question is not asked: say in one line that this stage has no alternatives left and that the user can name a skill in "Other" on the main question.
+   Text typed in "Other": if it asks to remove or drop the skill, drop it. Otherwise resolve it with **Typed text**. If the stage has no alternatives left, the only option is `Keep it`, so the question is not asked: say in one line that this stage has no alternatives left and that the user can, in "Other" on the main question, name a skill to use instead or ask to drop this one.
 
-4. A chosen alternative takes the replaced skill's place, and the replaced skill becomes one of the stage's alternatives. `Keep it` changes nothing. Then ask the main question again.
+4. A chosen alternative takes the replaced skill's place. A dropped skill leaves the list, and its stage too if that leaves the stage empty. Either way the old skill becomes one of the stage's alternatives again. `Keep it` changes nothing. Then ask the main question again.
 
 With a single skill in the list or in the chosen stage, the skill question has 1 option and is not asked: that skill is the one to replace.
 
 ## Add
 
+If the list already has 8 skills, do not ask: say in one line that the plan is full and that `Swap one` can replace a skill, then ask the main question again.
+
 **Ask** `Which skill should be added?` (header `Add`) with these options:
 - Up to 3 of the best-fitting alternatives across all stages (label: the invoke, description: its stage and a short version of what it does)
 - `Cancel`: Add nothing
 
-Text typed in "Other" is a skill name or a need: resolve it with **Typed text**. Add the chosen skill to the stage it fits best; it stops being an alternative. `Cancel` changes nothing. If no alternatives are left, the only option is `Cancel`, so the question is not asked: say in one line that the user can name a skill or a need in "Other" on the main question. Then ask the main question again.
+Text typed in "Other" is a skill name or a need: resolve it with **Typed text**. Add the chosen skill to the stage it fits best; it stops being an alternative. If that stage already has 4 skills, say in one line that the stage is full, then ask `Which skill should be replaced?` (see **Swap**) with that stage's skills as the options: the chosen one is replaced by the new skill and becomes an alternative. `Cancel` changes nothing. If no alternatives are left, the only option is `Cancel`, so the question is not asked: say in one line that the user can name a skill or a need in "Other" on the main question. Then ask the main question again.
 
 ## Typed text
 
