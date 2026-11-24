@@ -9,7 +9,7 @@ Most installed skills are visible to you only by name. This flow finds the ones 
 
 If this conversation already has a `Skill plan not saved` notice for the current job (step 6.7), keep following the list already shown and do not run this flow again.
 
-Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list, the questions and the one-line notices named below. Do none of the job's own work before step 7.
+Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list, the questions and the one-line notices named below. The list is not commentary: in approve and show modes the user must see it. Do none of the job's own work before step 7.
 
 ## 0. Command
 
@@ -96,8 +96,10 @@ Skills for: "<job summary>"
 
 Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<job summary>" (deep scan)`.
 
+To show the list, write it as text in your reply, before the next tool call. A list that is only in a command (such as the `save-plan` JSON) has not been shown.
+
 - **silent:** show nothing except the one-line notices from steps 3 and 6, and the list only if step 6.7 needs it. Go to step 6.
-- **show:** show the list, then go straight to step 6 without asking.
+- **show:** show the list (required: the user sees which skills will be used), then go straight to step 6 without asking.
 - **approve:** show the list, then Read `<base directory>/approve.md` with the Read tool and follow it. It ends in one of three ways: at step 6 with the approved list (saved with `--mode show` if the question tool was unavailable); with the job done without a plan (the user chose Skip; steps 6 and 7 do not apply); or stopped because the user declined a question (save nothing, start nothing, wait for the user's next message).
 
 ## 6. Save

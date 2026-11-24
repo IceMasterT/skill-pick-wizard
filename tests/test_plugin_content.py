@@ -462,3 +462,14 @@ def test_readme_documents_permission_prompts_and_allow_rules():
     assert "Bash(python3 *skill-pick-wizard*/scripts/pick.py*)" in text
     assert "Read(~/.local/share/skill-pick-wizard/**)" in text
     assert "permission" in text.lower()
+
+
+def test_show_and_approve_modes_must_write_the_list_as_text():
+    """Live run: in show mode Claude went from search straight to save-plan and never showed the list."""
+    act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
+    assert "To show the list, write it as text in your reply" in act
+    assert "before the next tool call" in act
+    show = next(l for l in act.splitlines() if l.startswith("- **show:**"))
+    assert "show the list" in show and "required" in show
+    intro = _section(_read(SKILL), "Follow the steps in order.", "## 0.")
+    assert "The list is not commentary" in intro
