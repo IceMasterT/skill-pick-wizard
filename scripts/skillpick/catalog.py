@@ -1,4 +1,5 @@
 """Deep scan catalog: all usable skills split into balanced chunk files, one skill per line."""
+import unicodedata
 from pathlib import Path
 
 from .sources import Skill
@@ -24,20 +25,41 @@ def split_chunks(skills: list[Skill], n: int = 3) -> list[list[Skill]]:
     return [sorted(c, key=lambda s: s.invoke) for c in chunks]
 
 
+def copyable(invoke: str) -> bool:
+    """True when a helper agent can copy the invoke exactly from a catalog line."""
+    return bool(invoke) and not any(
+        ch.isspace() or ch == "`" or unicodedata.category(ch) == "Cc" for ch in invoke
+    )
+
+
 def format_line(skill: Skill) -> str:
+    if not copyable(skill.invoke):
+        raise ValueError(f"invoke cannot be written to a catalog line: {skill.invoke!r}")
     tags = _one_line(", ".join(skill.tags))
     return f"- `{skill.invoke}` [{tags}]: {_one_line(skill.description)}"
 
 
 def write_catalog(skills: list[Skill], out_dir: Path, n: int = 3) -> list[Path]:
-    """Write out_dir/chunk-<i>.md (1-based), replacing any old chunk files."""
+    """Write out_dir/chunk-<i>.md (1-based) and return the paths.
+
+    Skills whose invoke cannot be copied exactly (whitespace, backtick, control characters)
+    are omitted. Nothing is touched when no skill is left. Every new chunk is written atomically
+    before any stale chunk-*.md (one the new set does not contain) is removed, so a failure
+    part-way never leaves a reader without a usable catalog.
+    """
     out_dir = Path(out_dir)
+    usable = [s for s in skills if copyable(s.invoke)]
+    chunks = split_chunks(usable, n)
+    if not chunks:
+        return []
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for old in out_dir.glob("chunk-*.md"):
-        old.unlink(missing_ok=True)
     paths = []
-    for i, chunk in enumerate(split_chunks(skills, n), start=1):
+    for i, chunk in enumerate(chunks, start=1):
         path = out_dir / f"chunk-{i}.md"
         atomic_write_text(path, "".join(format_line(s) + "\n" for s in chunk))
         paths.append(path)
+    keep = {p.name for p in paths}
+    for old in out_dir.glob("chunk-*.md"):
+        if old.name not in keep:
+            old.unlink(missing_ok=True)
     return paths

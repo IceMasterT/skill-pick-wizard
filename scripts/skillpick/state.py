@@ -203,6 +203,8 @@ def cleanup_sessions(data: Path, max_age_days: int = 14, now: float | None = Non
 
     Session files (<valid sid>.json in sessions/) and *.tmp files (left behind by a
     killed writer, in sessions/ and the data dir) and catalog/<valid sid>/ directories older than max_age_days are removed.
+    A catalog directory ages by its own mtime, which every catalog write refreshes (files are
+    replaced and removed inside it), so a session that keeps scanning keeps its catalog.
     Only files whose mtime is past the cutoff are touched, so a live writer's fresh
     temp file or session is never removed. A save landing between the stat and the
     unlink of an already stale file would be lost; that race is accepted because the

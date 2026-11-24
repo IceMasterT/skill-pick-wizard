@@ -192,6 +192,8 @@ def cmd_catalog(args) -> None:
     data = data_dir()
     skills = service.allowed_skills(claude_home(), cwd, data, load_config(data))
     paths = catalog.write_catalog(skills, data / "catalog" / sid, args.chunks)
+    if not paths:
+        raise UserError("no skills to catalog")
     for path in paths:
         print(path.resolve())
 
