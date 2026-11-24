@@ -35,4 +35,55 @@ def test_no_frontmatter_returns_empty():
 
 
 def test_nested_mapping_values_are_ignored_not_crashing():
-    assert p("---\nname: x\nmetadata:\n  a: 1\n---\n")["name"] == "x"
+    r = p("---\nname: x\nmetadata:\n  a: 1\n---\n")
+    assert r["name"] == "x"
+    assert "metadata" not in r
+
+
+def test_crlf_folded_block():
+    assert p("---\r\ndescription: >-\r\n  Line one\r\n  line two\r\nname: x\r\n---\r\n") == {"description": "Line one line two", "name": "x"}
+
+
+def test_crlf_multiline_plain():
+    assert p("---\r\ndescription: first\r\n  second\r\n---\r\n")["description"] == "first second"
+
+
+def test_blank_line_inside_block():
+    assert p("---\ndescription: |\n  a\n\n  b\nname: x\n---\n") == {"description": "a b", "name": "x"}
+
+
+def test_value_on_next_indented_line():
+    assert p("---\ndescription:\n  Use when testing\nname: x\n---\n") == {"description": "Use when testing", "name": "x"}
+
+
+def test_indented_dashes_inside_block_do_not_terminate():
+    assert p("---\ndescription: |\n  a\n  ---\n  b\nname: x\n---\n") == {"description": "a --- b", "name": "x"}
+
+
+def test_hash_line_inside_block_is_content():
+    assert p("---\ndescription: |\n  # Heading\n  text\n---\n")["description"] == "# Heading text"
+
+
+def test_hash_comment_lines_outside_blocks_skipped():
+    assert p("---\n# top\nname: x\ndescription: a\n  # inner\n  b\n---\n") == {"name": "x", "description": "a b"}
+
+
+def test_double_quote_escapes():
+    assert p('---\ndescription: "a\\nb\\tc \\"q\\" \\\\ \\/ \\u00e9 \\x41"\n---\n')["description"] == 'a\nb\tc "q" \\ / \u00e9 A'
+    assert p("---\ndescription: 'a\\nb'\n---\n")["description"] == "a\\nb"
+
+
+def test_quoted_with_trailing_comment():
+    assert p("---\nname: 'x' # c\n---\n")["name"] == "x"
+    assert p('---\nname: "x y"   # c\n---\n')["name"] == "x y"
+    assert p("---\ntags:\n- 'a' # c\n---\n")["tags"] == ["a"]
+
+
+def test_plain_comment_rules():
+    assert p("---\nname: x # c\n---\n")["name"] == "x"
+    assert p("---\nname: a#b\n---\n")["name"] == "a#b"
+    assert p("---\ndescription: |  # c\n  a\n---\n")["description"] == "a"
+
+
+def test_multiline_inline_list():
+    assert p("---\ntags: [a,\n  b, 'c, d']\nname: x\n---\n") == {"tags": ["a", "b", "c, d"], "name": "x"}
