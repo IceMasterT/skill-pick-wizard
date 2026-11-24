@@ -30,38 +30,60 @@ def _with_vault_tags(skills: list[Skill], tags: dict[str, tuple[str, ...]]) -> l
     return merged
 
 
-def fresh_indexes(
+GLOBAL = "global"
+
+
+def project_segment(cwd: Path) -> str:
+    return f"project:{project_key(cwd)}"
+
+
+def fresh_index(
     claude_home: Path, cwd: Path, data: Path, cfg: Config, force: bool = False
-) -> tuple[SkillIndex, SkillIndex]:
-    """Return (global_index, project_index), rebuilding each only when its fingerprint changed (or force)."""
+) -> SkillIndex:
+    """The single index, with the global and this project's segments rebuilt when their fingerprints changed."""
+    index = SkillIndex(Path(data) / "index" / "skills.sqlite")
     vault_dir = _vault_dir(cfg)
-    global_index = SkillIndex(Path(data) / "index" / "global.sqlite")
     fp = fingerprint(skill_files(claude_home) + vault.skill_files(vault_dir))
-    if force or global_index.stored_fingerprint() != fp:
+    if force or index.stored_fingerprint(GLOBAL) != fp:
         skills = user_skills(claude_home) + plugin_skills(claude_home)
-        global_index.rebuild(_with_vault_tags(skills, vault.area_tags(vault_dir)), fp)
+        index.replace_segment(GLOBAL, _with_vault_tags(skills, vault.area_tags(vault_dir)), fp)
 
-    project_index = SkillIndex(Path(data) / "index" / f"project-{project_key(cwd)}.sqlite")
+    segment = project_segment(cwd)
     fp = fingerprint(project_skill_files(claude_home, cwd))
-    if force or project_index.stored_fingerprint() != fp:
-        project_index.rebuild(project_skills(cwd) + project_plugin_skills(claude_home, cwd), fp)
-    return global_index, project_index
+    if force or index.stored_fingerprint(segment) != fp:
+        index.replace_segment(segment, project_skills(cwd) + project_plugin_skills(claude_home, cwd), fp)
+    return index
 
 
-def _is_allowed(enabled: set[str]):
-    return lambda s: s.plugin_id is None or s.plugin_id in enabled
+class _View:
+    """What this project may use: the single place that decides plugin enablement and project shadowing."""
+
+    def __init__(self, claude_home: Path, cwd: Path, data: Path, cfg: Config, force: bool = False):
+        self.index = fresh_index(claude_home, cwd, data, cfg, force)
+        self.project = project_segment(cwd)
+        self._enabled = enabled_plugin_ids(claude_home, cwd)
+        self._shadowed = {
+            s.invoke for s in self.index.all(self.project) if self._plugin_ok(s)
+        }
+
+    def _plugin_ok(self, skill: Skill) -> bool:
+        return skill.plugin_id is None or skill.plugin_id in self._enabled
+
+    def allow(self, skill: Skill, segment: str) -> bool:
+        if not self._plugin_ok(skill):
+            return False
+        if segment == self.project:
+            return True
+        return segment == GLOBAL and skill.invoke not in self._shadowed
+
+    def skills(self) -> list[Skill]:
+        found = [s for seg in (GLOBAL, self.project) for s in self.index.all(seg) if self.allow(s, seg)]
+        return sorted(found, key=lambda s: s.invoke)
 
 
 def allowed_skills(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> list[Skill]:
     """Every usable skill: enabled plugins only, and a project skill replaces a global one with the same invoke."""
-    global_index, project_index = fresh_indexes(claude_home, cwd, data, cfg)
-    allow = _is_allowed(enabled_plugin_ids(claude_home, cwd))
-    project = [s for s in project_index.all() if allow(s)]
-    shadowed = {s.invoke for s in project}
-    return sorted(
-        [s for s in global_index.all() if allow(s) and s.invoke not in shadowed] + project,
-        key=lambda s: s.invoke,
-    )
+    return _View(claude_home, cwd, data, cfg).skills()
 
 
 def known_invokes(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> set[str]:
@@ -71,10 +93,11 @@ def known_invokes(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> set[
 def search(
     claude_home: Path, cwd: Path, data: Path, cfg: Config, queries: list[str], limit: int = 30
 ) -> list[Hit]:
-    global_index, project_index = fresh_indexes(claude_home, cwd, data, cfg)
-    allow = _is_allowed(enabled_plugin_ids(claude_home, cwd))
-    shadowed = {s.invoke for s in project_index.all() if allow(s)}
-    hits = project_index.search(queries, limit, allow)
-    hits += global_index.search(queries, limit, lambda s: allow(s) and s.invoke not in shadowed)
-    hits.sort(key=lambda h: (-h.score, h.skill.invoke))
-    return hits[:limit]
+    view = _View(claude_home, cwd, data, cfg)
+    return view.index.search(queries, limit, view.allow)
+
+
+def index_counts(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> tuple[int, int, int]:
+    """Force a rebuild; return (global skills, project skills, searchable skills for this cwd)."""
+    view = _View(claude_home, cwd, data, cfg, force=True)
+    return view.index.count(GLOBAL), view.index.count(view.project), len(view.skills())

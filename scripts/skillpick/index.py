@@ -1,4 +1,8 @@
-"""SQLite FTS5 index of skills with multi-query reciprocal-rank-fusion search."""
+"""SQLite FTS5 index of skills with multi-query reciprocal-rank-fusion search.
+
+One database holds every segment ("global", "project:<key>", ...) so a search ranks one corpus.
+Each segment is replaced independently and carries its own fingerprint.
+"""
 import hashlib
 import json
 import re
@@ -13,20 +17,22 @@ from .sources import Skill
 _WORD = re.compile(r"[^\W_]+")
 _RRF_K = 60
 # Bump when the table layout changes; a mismatch drops and recreates the (cache-only) index.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _COLUMNS = "invoke, name, description, source, plugin_id, path, tags_json"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS skills(
     rowid INTEGER PRIMARY KEY,
-    invoke TEXT UNIQUE,
+    segment TEXT NOT NULL,
+    invoke TEXT NOT NULL,
     name TEXT,
     description TEXT,
     source TEXT,
     plugin_id TEXT,
     path TEXT,
-    tags_json TEXT
+    tags_json TEXT,
+    UNIQUE(segment, invoke)
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     invoke, name, description, tags,
@@ -67,6 +73,10 @@ def build_fts_query(text: str) -> str | None:
     if not words:
         return None
     return " OR ".join(f'"{w}"' for w in words)
+
+
+def _fp_key(segment: str) -> str:
+    return f"fingerprint:{segment}"
 
 
 def _invoke_text(invoke: str) -> str:
@@ -120,28 +130,29 @@ class SkillIndex:
                 pass
             raise
 
-    def stored_fingerprint(self) -> str | None:
+    def stored_fingerprint(self, segment: str = "global") -> str | None:
         with closing(self._connect()) as conn:
-            row = conn.execute("SELECT v FROM meta WHERE k = 'fingerprint'").fetchone()
+            row = conn.execute("SELECT v FROM meta WHERE k = ?", (_fp_key(segment),)).fetchone()
         return row[0] if row else None
 
-    def rebuild(self, skills: list[Skill], fp: str) -> None:
-        """Drop and refill the whole index in a single transaction."""
+    def replace_segment(self, segment: str, skills: list[Skill], fp: str) -> None:
+        """Replace one segment's rows and fingerprint in a single transaction; other segments are untouched."""
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.execute("DROP TABLE IF EXISTS fts")
-                conn.execute("DROP TABLE IF EXISTS skills")
-                conn.execute("DROP TABLE IF EXISTS meta")
-                self._create_schema(conn)
+                conn.execute(
+                    "DELETE FROM fts WHERE rowid IN (SELECT rowid FROM skills WHERE segment = ?)",
+                    (segment,),
+                )
+                conn.execute("DELETE FROM skills WHERE segment = ?", (segment,))
                 seen: set[str] = set()
                 for s in skills:
                     if s.invoke in seen:
                         continue
                     seen.add(s.invoke)
                     cur = conn.execute(
-                        f"INSERT INTO skills({_COLUMNS}) VALUES (?,?,?,?,?,?,?)",
-                        (s.invoke, s.name, s.description, s.source, s.plugin_id, s.path,
+                        f"INSERT INTO skills(segment, {_COLUMNS}) VALUES (?,?,?,?,?,?,?,?)",
+                        (segment, s.invoke, s.name, s.description, s.source, s.plugin_id, s.path,
                          json.dumps(list(s.tags))),
                     )
                     conn.execute(
@@ -149,7 +160,9 @@ class SkillIndex:
                         (cur.lastrowid, _invoke_text(s.invoke), s.name, s.description,
                          " ".join(s.tags)),
                     )
-                conn.execute("INSERT INTO meta(k, v) VALUES ('fingerprint', ?)", (fp,))
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_fp_key(segment), fp)
+                )
                 conn.execute("COMMIT")
             except BaseException:
                 try:
@@ -158,19 +171,22 @@ class SkillIndex:
                     pass  # never mask the original exception
                 raise
 
-    def count(self) -> int:
-        with closing(self._connect()) as conn:
-            return conn.execute("SELECT COUNT(*) FROM skills").fetchone()[0]
+    def count(self, segment: str | None = None) -> int:
+        return len(self.all(segment))
 
-    def all(self) -> list[Skill]:
+    def all(self, segment: str | None = None) -> list[Skill]:
+        """Skills of one segment, or of every segment when segment is None."""
+        where, params = ("WHERE segment = ?", (segment,)) if segment is not None else ("", ())
         with closing(self._connect()) as conn:
-            rows = conn.execute(f"SELECT {_COLUMNS} FROM skills ORDER BY invoke").fetchall()
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM skills {where} ORDER BY invoke, segment", params
+            ).fetchall()
         return [_row_to_skill(r) for r in rows]
 
-    def get(self, invoke: str) -> Skill | None:
+    def get(self, invoke: str, segment: str = "global") -> Skill | None:
         with closing(self._connect()) as conn:
             row = conn.execute(
-                f"SELECT {_COLUMNS} FROM skills WHERE invoke = ?", (invoke,)
+                f"SELECT {_COLUMNS} FROM skills WHERE segment = ? AND invoke = ?", (segment, invoke)
             ).fetchone()
         return _row_to_skill(row) if row else None
 
@@ -178,11 +194,11 @@ class SkillIndex:
         self,
         queries: list[str],
         limit: int = 30,
-        allow: Callable[[Skill], bool] = lambda s: True,
+        allow: Callable[[Skill, str], bool] = lambda skill, segment: True,
     ) -> list[Hit]:
         """Reciprocal-rank-fuse the per-query FTS results.
 
-        `allow` is applied to each query's full match list before that query's ranks
+        `allow(skill, segment)` is applied to each query's full match list before that query's ranks
         are assigned, so restrictive filters still fill `limit`. All queries run inside
         one read transaction, so a concurrent rebuild can never produce a mixed result.
         """
@@ -197,15 +213,15 @@ class SkillIndex:
                     if fts_query is None:
                         continue
                     rows = conn.execute(
-                        "SELECT " + ", ".join(f"s.{c.strip()}" for c in _COLUMNS.split(","))
+                        "SELECT " + ", ".join(f"s.{c.strip()}" for c in _COLUMNS.split(",")) + ", s.segment"
                         + " FROM fts JOIN skills s ON s.rowid = fts.rowid WHERE fts MATCH ? "
                         "ORDER BY bm25(fts, 10.0, 8.0, 1.0, 3.0), fts.rowid",
                         (fts_query,),
                     ).fetchall()
                     rank = 0
                     for row in rows:
-                        skill = _row_to_skill(row)
-                        if not allow(skill):
+                        skill = _row_to_skill(row[:-1])
+                        if not allow(skill, row[-1]):
                             continue
                         found[skill.invoke] = skill
                         scores[skill.invoke] = scores.get(skill.invoke, 0.0) + 1.0 / (_RRF_K + rank)

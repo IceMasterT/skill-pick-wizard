@@ -28,17 +28,40 @@ class UserError(Exception):
     """An expected failure: reported as one stderr line with exit code 2."""
 
 
-def _session_id(args) -> str:
+def _session_id(args, required: bool = True) -> str:
     sid = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
-        raise UserError("no session id")
+        if required:
+            raise UserError("no session id")
+        return ""
     if not valid_session_id(sid):
         raise UserError("invalid session id")
     return sid
 
 
 def _cwd(args) -> Path:
-    return Path(args.cwd).expanduser() if args.cwd else Path.cwd()
+    if not args.cwd:
+        return Path.cwd()
+    path = Path(args.cwd).expanduser()
+    if not path.is_dir():
+        raise UserError(f"no such directory: {args.cwd}")
+    return path
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer: {text!r}")
+    return value
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        """One stderr line and exit 2, instead of argparse's usage dump."""
+        self.exit(2, f"{self.prog}: error: {message}\n")
 
 
 def _plan_lines(state: SessionState) -> list[str]:
@@ -55,7 +78,7 @@ def cmd_status(args) -> None:
     print(f"mode: {cfg.mode}")
     print(f"deep_scan: {_on_off(cfg.deep_scan)}")
     print(f"deep_scan_model: {cfg.deep_scan_model}")
-    sid = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    sid = _session_id(args, required=False)
     state = load_session(data, sid) if sid else None
     print(f"session: {state.status if state else 'none'}")
     if state and state.status == "planned":
@@ -67,8 +90,9 @@ def cmd_status(args) -> None:
 
 
 def cmd_search(args) -> None:
+    cwd = _cwd(args)
     data = data_dir()
-    hits = service.search(claude_home(), _cwd(args), data, load_config(data), args.queries, args.limit)
+    hits = service.search(claude_home(), cwd, data, load_config(data), args.queries, args.limit)
     if not hits:
         print("no matches")
         return
@@ -85,15 +109,18 @@ def _parse_plan(raw: str) -> list[Stage]:
         raise UserError("invalid --plan JSON") from None
     if not isinstance(plan, list) or not plan:
         raise UserError("invalid --plan: expected a non-empty JSON list")
+    shape = 'invalid --plan: each item needs a non-empty "stage" (string) and a non-empty "skills" (list of strings)'
     stages = []
     for item in plan:
         if not (
             isinstance(item, dict)
             and isinstance(item.get("stage"), str)
             and isinstance(item.get("skills"), list)
-            and all(isinstance(s, str) for s in item["skills"])
+            and item["stage"].strip()
+            and item["skills"]
+            and all(isinstance(s, str) and s for s in item["skills"])
         ):
-            raise UserError('invalid --plan: each item needs "stage" (string) and "skills" (list of strings)')
+            raise UserError(shape)
         stages.append(Stage(item["stage"], list(item["skills"])))
     return stages
 
@@ -101,9 +128,10 @@ def _parse_plan(raw: str) -> list[Stage]:
 def cmd_save_plan(args) -> None:
     sid = _session_id(args)
     stages = _parse_plan(args.plan)
+    cwd = _cwd(args)
     data = data_dir()
     cfg = load_config(data)
-    known = service.known_invokes(claude_home(), _cwd(args), data, cfg)
+    known = service.known_invokes(claude_home(), cwd, data, cfg)
     unknown = list(dict.fromkeys(s for st in stages for s in st.skills if s not in known))
     if unknown:
         raise UserError(f"unknown skills: {', '.join(unknown)}")
@@ -151,15 +179,15 @@ def cmd_deep_scan(args) -> None:
 
 
 def cmd_index(args) -> None:
+    cwd = _cwd(args)
     data = data_dir()
-    global_index, project_index = service.fresh_indexes(
-        claude_home(), _cwd(args), data, load_config(data), force=True
-    )
-    print(f"global: {global_index.count()} skills, project: {project_index.count()} skills")
+    n_global, n_project, searchable = service.index_counts(claude_home(), cwd, data, load_config(data))
+    print(f"global: {n_global} skills, project: {n_project} skills")
+    print(f"searchable: {searchable}")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pick.py", description="skill-pick-wizard CLI")
+    parser = _Parser(prog="pick.py", description="skill-pick-wizard CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name: str, func, session: bool = False, cwd: bool = False) -> argparse.ArgumentParser:
@@ -173,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("status", cmd_status, session=True)
     p = add("search", cmd_search, cwd=True)
-    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--limit", type=_positive_int, default=30)
     p.add_argument("queries", nargs="+", metavar="QUERY")
     p = add("save-plan", cmd_save_plan, session=True, cwd=True)
     p.add_argument("--job", required=True)

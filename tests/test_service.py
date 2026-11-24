@@ -80,20 +80,20 @@ def test_vault_tag_change_triggers_rebuild(env):
 def test_rebuild_only_when_changed(env, monkeypatch):
     md = make_skill(env.claude_home / "skills", "alpha", "description: first skill")
     calls = []
-    original = SkillIndex.rebuild
+    original = SkillIndex.replace_segment
 
-    def counting(self, skills, fp):
-        calls.append(self.db_path.name)
-        return original(self, skills, fp)
+    def counting(self, segment, skills, fp):
+        calls.append(segment)
+        return original(self, segment, skills, fp)
 
-    monkeypatch.setattr(SkillIndex, "rebuild", counting)
+    monkeypatch.setattr(SkillIndex, "replace_segment", counting)
     cfg = cfg_for(env)
     service.search(env.claude_home, env.cwd, env.data, cfg, ["first"])
     service.search(env.claude_home, env.cwd, env.data, cfg, ["first"])
-    assert calls.count("global.sqlite") == 1
+    assert calls.count("global") == 1
     os.utime(md, ns=(1, 12345))
     service.search(env.claude_home, env.cwd, env.data, cfg, ["first"])
-    assert calls.count("global.sqlite") == 2
+    assert calls.count("global") == 2
 
 
 def test_new_skill_appears_after_install(env):
@@ -127,9 +127,47 @@ def test_allowed_skills_excludes_disabled_and_merges_sources(env):
 def test_force_rebuild(env, monkeypatch):
     make_skill(env.claude_home / "skills", "alpha", "description: first skill")
     cfg = cfg_for(env)
-    service.fresh_indexes(env.claude_home, env.cwd, env.data, cfg)
+    service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
     calls = []
-    original = SkillIndex.rebuild
-    monkeypatch.setattr(SkillIndex, "rebuild", lambda self, s, fp: (calls.append(1), original(self, s, fp)))
-    service.fresh_indexes(env.claude_home, env.cwd, env.data, cfg, force=True)
-    assert len(calls) == 2
+    original = SkillIndex.replace_segment
+    monkeypatch.setattr(
+        SkillIndex, "replace_segment", lambda self, seg, s, fp: (calls.append(seg), original(self, seg, s, fp))
+    )
+    service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
+    assert calls == []
+    service.fresh_index(env.claude_home, env.cwd, env.data, cfg, force=True)
+    assert calls == ["global", service.project_segment(env.cwd)]
+
+
+def test_project_rebuild_independent_of_global(env, monkeypatch):
+    make_skill(env.claude_home / "skills", "alpha", "description: first skill")
+    md = make_skill(env.cwd / ".claude" / "skills", "proj", "description: second skill")
+    cfg = cfg_for(env)
+    service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
+    calls = []
+    original = SkillIndex.replace_segment
+    monkeypatch.setattr(
+        SkillIndex, "replace_segment", lambda self, seg, s, fp: (calls.append(seg), original(self, seg, s, fp))
+    )
+    os.utime(md, ns=(1, 777))
+    service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
+    assert calls == [service.project_segment(env.cwd)]
+
+
+def test_one_ranking_across_global_and_project(env):
+    for n in range(3):
+        make_skill(env.claude_home / "skills", f"widget-{n}", "description: alpha widget")
+    make_skill(env.cwd / ".claude" / "skills", "zz-proj", "description: does many things and mentions alpha in passing")
+    hits = invokes(service.search(env.claude_home, env.cwd, env.data, cfg_for(env), ["alpha"]))
+    assert hits[-1] == "zz-proj"
+    assert set(hits[:3]) == {"widget-0", "widget-1", "widget-2"}
+
+
+def test_other_projects_segment_not_visible(env):
+    other = env.cwd.parent / "other"
+    other.mkdir()
+    make_skill(other / ".claude" / "skills", "theirs", "description: unique zebra tool")
+    cfg = cfg_for(env)
+    assert invokes(service.search(env.claude_home, other, env.data, cfg, ["zebra"])) == ["theirs"]
+    assert service.search(env.claude_home, env.cwd, env.data, cfg, ["zebra"]) == []
+    assert "theirs" not in service.known_invokes(env.claude_home, env.cwd, env.data, cfg)

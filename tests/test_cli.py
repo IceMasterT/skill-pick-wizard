@@ -137,10 +137,47 @@ def test_index_forces_rebuild(env, capsys):
     seed(env)
     make_skill(env.cwd / ".claude" / "skills", "p1", "description: project one")
     code, out, _ = run(capsys, "index", "--cwd", str(env.cwd))
-    assert (code, out) == (0, "global: 2 skills, project: 1 skills\n")
+    assert (code, out) == (0, "global: 2 skills, project: 1 skills\nsearchable: 3\n")
 
 
 def test_build_parser_exposes_subcommands():
     parser = pick.build_parser()
     sub = next(a for a in parser._actions if a.dest == "command")
     assert {"status", "search", "save-plan", "skip", "reset", "show-plan", "mode", "deep-scan", "index"} <= set(sub.choices)
+
+
+def test_limit_must_be_positive(env, capsys):
+    for bad in ("0", "-3", "x"):
+        code, out, err = run(capsys, "search", "--limit", bad, "q")
+        assert code == 2 and out == "" and err.count("\n") == 1
+
+
+def test_missing_cwd_exits_2_and_creates_nothing(env, capsys):
+    ghost = env.data.parent / "ghost"
+    cmds = (
+        ["search", "--cwd", str(ghost), "q"],
+        ["index", "--cwd", str(ghost)],
+        ["save-plan", "--cwd", str(ghost), "--session", "s1", "--job", "j", "--plan", PLAN],
+    )
+    for argv in cmds:
+        code, out, err = run(capsys, *argv)
+        assert code == 2 and err == f"no such directory: {ghost}\n"
+    assert not ghost.exists() and not (env.data / "index").exists()
+
+
+def test_argparse_error_is_one_line(env, capsys):
+    for argv in (["bogus"], [], ["mode", "loud"], ["save-plan"]):
+        code, out, err = run(capsys, *argv)
+        assert code == 2 and out == "" and err.count("\n") == 1 and "Traceback" not in err
+
+
+def test_status_invalid_session_id(env, capsys):
+    code, out, err = run(capsys, "status", "--session", "../x")
+    assert code == 2 and err == "invalid session id\n"
+
+
+def test_save_plan_rejects_empty_stage_or_skills(env, capsys):
+    for bad in ('[{"stage": "", "skills": ["a"]}]', '[{"stage": "  ", "skills": ["a"]}]',
+                '[{"stage": "x", "skills": []}]', '[{"stage": "x", "skills": [""]}]'):
+        code, _, err = run(capsys, "save-plan", "--session", "s1", "--job", "j", "--plan", bad)
+        assert code == 2 and err.startswith("invalid --plan") and err.count("\n") == 1

@@ -32,7 +32,7 @@ SKILLS = [
 @pytest.fixture
 def idx(tmp_path):
     i = SkillIndex(tmp_path / "idx.db")
-    i.rebuild(SKILLS, "fp1")
+    i.replace_segment("global", SKILLS, "fp1")
     return i
 
 
@@ -77,7 +77,7 @@ def test_limit_respected(idx):
 
 
 def test_allow_filter(idx):
-    hits = idx.search(["brainstorming"], allow=lambda s: s.plugin_id != "sp@m")
+    hits = idx.search(["brainstorming"], allow=lambda s, seg: s.plugin_id != "sp@m")
     assert invokes(hits) == ["brainstorming", "zz-distractor"]
     assert "sp:brainstorming" not in invokes(hits)
 
@@ -98,7 +98,7 @@ def test_special_char_queries_still_match(idx):
 
 def test_rebuild_replaces_contents_and_fingerprint(idx):
     assert idx.count() == len(SKILLS) and idx.stored_fingerprint() == "fp1"
-    idx.rebuild([SKILLS[-1]], "fp2")
+    idx.replace_segment("global", [SKILLS[-1]], "fp2")
     assert idx.count() == 1
     assert idx.stored_fingerprint() == "fp2"
     assert idx.search(["brainstorming"]) == []
@@ -146,7 +146,7 @@ def test_build_fts_query():
 def test_search_is_fast_on_large_index(tmp_path):
     big = [_skill(f"skill-{i}", f"description number {i} about topic{i % 50} and things") for i in range(1100)]
     i = SkillIndex(tmp_path / "big.db")
-    i.rebuild(big, "x")
+    i.replace_segment("global", big, "x")
     i.search(["warm"])
     t = time.perf_counter()
     for q in ("topic7 things", "description", "skill-5"):
@@ -157,7 +157,7 @@ def test_search_is_fast_on_large_index(tmp_path):
 def test_failed_rebuild_keeps_old_contents(idx):
     bad = [_skill("good", "fine"), _skill("bad", "boom", tags=(object(),))]
     with pytest.raises(TypeError):
-        idx.rebuild(bad, "fp-bad")
+        idx.replace_segment("global", bad, "fp-bad")
     assert idx.count() == len(SKILLS)
     assert idx.stored_fingerprint() == "fp1"
     assert "stripe-payments" in invokes(idx.search(["stripe"]))
@@ -167,7 +167,7 @@ def test_failed_rebuild_keeps_old_contents(idx):
 def test_search_correct_after_rebuild_on_other_connection(idx):
     other = SkillIndex(idx.db_path)
     assert invokes(idx.search(["stripe"])) == ["stripe-payments"]
-    other.rebuild([_skill("fresh-one", "Stripe refunds and disputes")], "fp9")
+    other.replace_segment("global", [_skill("fresh-one", "Stripe refunds and disputes")], "fp9")
     assert invokes(idx.search(["stripe"])) == ["fresh-one"]
     assert idx.stored_fingerprint() == "fp9"
     assert idx.get("stripe-payments") is None
@@ -195,8 +195,8 @@ def test_duplicate_queries_not_double_counted(idx):
 def test_allow_applied_before_ranking_and_limit(tmp_path):
     many = [_skill(f"s{i:03d}", "common words here") for i in range(150)]
     i = SkillIndex(tmp_path / "m.db")
-    i.rebuild(many, "f")
-    hits = i.search(["common"], limit=30, allow=lambda s: s.invoke >= "s140" or s.invoke == "s000")
+    i.replace_segment("global", many, "f")
+    hits = i.search(["common"], limit=30, allow=lambda s, seg: s.invoke >= "s140" or s.invoke == "s000")
     assert len(hits) == 11
     assert hits[0].score == pytest.approx(1 / 60)
 
@@ -207,7 +207,7 @@ def test_unicode_words():
 
 def test_unicode_search(tmp_path):
     i = SkillIndex(tmp_path / "u.db")
-    i.rebuild([_skill("cafe-menu", "Plan a café menu")], "f")
+    i.replace_segment("global", [_skill("cafe-menu", "Plan a café menu")], "f")
     assert invokes(i.search(["café"])) == ["cafe-menu"]
 
 
@@ -223,8 +223,55 @@ def test_stale_schema_is_recreated(tmp_path):
     i = SkillIndex(db)
     assert i.stored_fingerprint() is None
     assert i.count() == 0
-    i.rebuild(SKILLS, "new")
+    i.replace_segment("global", SKILLS, "new")
     assert i.get("stripe-payments").tags == ()
     assert invokes(i.search(["stripe"])) == ["stripe-payments"]
     with sqlite3.connect(db) as c:
         assert c.execute("PRAGMA user_version").fetchone()[0] != 1
+
+
+def test_segments_are_independent(tmp_path):
+    i = SkillIndex(tmp_path / "seg.db")
+    i.replace_segment("global", [_skill("g1", "alpha widget")], "fg")
+    i.replace_segment("project:a", [_skill("p1", "beta gadget")], "fa")
+    i.replace_segment("project:b", [_skill("p1", "gamma gizmo")], "fb")
+    assert (i.stored_fingerprint("global"), i.stored_fingerprint("project:a")) == ("fg", "fa")
+    assert i.stored_fingerprint("project:zzz") is None
+    i.replace_segment("project:a", [_skill("p2", "delta")], "fa2")
+    assert i.stored_fingerprint("project:a") == "fa2" and i.stored_fingerprint("global") == "fg"
+    assert [s.invoke for s in i.all("project:a")] == ["p2"]
+    assert [s.invoke for s in i.all("project:b")] == ["p1"]
+    assert i.count() == 3 and i.count("global") == 1
+    assert invokes(i.search(["beta"])) == []
+    assert invokes(i.search(["gamma"])) == ["p1"]
+    assert i.get("p1", "project:b").description == "gamma gizmo"
+    assert i.get("p1") is None
+
+
+def test_same_invoke_in_two_segments_and_allow_sees_segment(tmp_path):
+    i = SkillIndex(tmp_path / "seg.db")
+    i.replace_segment("global", [_skill("dup", "common words")], "f")
+    i.replace_segment("project:a", [_skill("dup", "common words")], "f")
+    assert len(i.search(["common"], allow=lambda s, seg: seg == "global")) == 1
+    [hit] = i.search(["common"], allow=lambda s, seg: seg == "project:a")
+    assert hit.skill.invoke == "dup"
+
+
+def test_failed_segment_replace_keeps_other_and_old_rows(tmp_path):
+    i = SkillIndex(tmp_path / "seg.db")
+    i.replace_segment("global", [_skill("g1", "alpha")], "fg")
+    i.replace_segment("project:a", [_skill("p1", "beta")], "fa")
+    with pytest.raises(TypeError):
+        i.replace_segment("project:a", [_skill("bad", "x", tags=(object(),))], "fx")
+    assert [s.invoke for s in i.all("project:a")] == ["p1"]
+    assert i.stored_fingerprint("project:a") == "fa"
+    assert invokes(i.search(["alpha"])) == ["g1"]
+
+
+def test_single_ranking_across_segments(tmp_path):
+    """A passing mention in a project skill must not outrank real matches in the global segment."""
+    i = SkillIndex(tmp_path / "seg.db")
+    i.replace_segment("global", [_skill(f"widget-{n}", "alpha widget") for n in range(3)], "fg")
+    i.replace_segment("project:a", [_skill("zz-proj", "Does many other things, mentions alpha in passing")], "fa")
+    hits = invokes(i.search(["alpha"]))
+    assert hits[-1] == "zz-proj" and set(hits[:3]) == {"widget-0", "widget-1", "widget-2"}
