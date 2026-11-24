@@ -1,5 +1,5 @@
 ---
-name: skill-pick
+name: pick-skills
 description: Use when the Skill Pick Wizard hook says a skill scan is pending, or when /autopick or /skill-pick runs. Picks the installed skills that fit the job by their full descriptions, asks for approval when the mode says so, saves the plan, and starts the job with the first stage's skills.
 ---
 

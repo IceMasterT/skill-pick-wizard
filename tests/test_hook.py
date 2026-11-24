@@ -27,14 +27,14 @@ def test_no_session_injects_scan_instruction():
     text = build_context("build x", "s1", Config(), None, PICK)
     assert text.startswith("Skill Pick Wizard - skill scan pending.")
     for part in ("skill scan pending", "session: s1", "mode: approve",
-                 "deep scan: off", "skill-pick-wizard:skill-pick", f"run with: {PICK}"):
+                 "deep scan: off", "skill-pick-wizard:pick-skills", f"run with: {PICK}"):
         assert part in text
 
 
 def test_scan_pending_ending_is_strong():
     text = build_context("x", "s1", Config(), None, PICK)
     assert text.endswith(
-        "Invoke the skill-pick-wizard:skill-pick skill now, before any other tool call or answer. "
+        "Invoke the skill-pick-wizard:pick-skills skill now, before any other tool call or answer. "
         "Skip it only if this message is just a greeting, thanks, or a question you can fully "
         "answer in one or two sentences without doing any work."
     )

@@ -53,7 +53,7 @@ def build_context(
             f"mode: {cfg.mode}",
             f"deep scan: {deep}",
             f"run with: {pick_cmd}",
-            "Invoke the skill-pick-wizard:skill-pick skill now, before any other tool call or "
+            "Invoke the skill-pick-wizard:pick-skills skill now, before any other tool call or "
             "answer. Skip it only if this message is just a greeting, thanks, or a question you "
             "can fully answer in one or two sentences without doing any work.",
         ]

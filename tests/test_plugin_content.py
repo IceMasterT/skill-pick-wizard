@@ -12,7 +12,7 @@ from skillpick.hookctx import PLUGIN_COMMANDS, build_context
 from skillpick.state import Config
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL_DIR = REPO / "skills" / "skill-pick"
+SKILL_DIR = REPO / "skills" / "pick-skills"
 SKILL = SKILL_DIR / "SKILL.md"
 APPROVE = SKILL_DIR / "approve.md"
 AGENT = REPO / "agents" / "skill-deep-scanner.md"
@@ -137,7 +137,7 @@ def test_skill_support_files_are_referenced_and_have_no_frontmatter():
 
 
 def test_skill_name_matches_its_directory():
-    assert parse_frontmatter(_read(SKILL))["name"] == SKILL.parent.name == "skill-pick"
+    assert parse_frontmatter(_read(SKILL))["name"] == SKILL.parent.name == "pick-skills"
 
 
 def test_skill_description_states_its_triggers():
@@ -228,7 +228,7 @@ def test_command_runs_the_plugin_cli(name, line):
 def test_flow_commands_follow_the_skill():
     for name in ("autopick", "skill-pick"):
         text = _read(COMMANDS / f"{name}.md")
-        assert "skill-pick-wizard:skill-pick" in text, name
+        assert "skill-pick-wizard:pick-skills" in text, name
         assert "$ARGUMENTS" in text, name
     assert "--mode silent" in _read(COMMANDS / "autopick.md")
 
@@ -367,3 +367,11 @@ def test_add_respects_the_pick_limits():
     assert "8 skills" in add and "4 skills" in add and "Which skill should be replaced?" in add
     other = _section(_read(APPROVE), '**Text typed in "Other":**', "After every swap")
     assert "SKILL.md step 4.1" in other
+
+
+def test_skill_name_does_not_collide_with_a_command():
+    # A command and a skill with the same name share one invoke name (plugin:name); the Skill tool then
+    # launches the command body instead of the skill, so the flow never loads.
+    commands = {p.stem for p in COMMANDS.glob("*.md")}
+    skills = {p.name for p in (REPO / "skills").iterdir() if p.is_dir()}
+    assert commands.isdisjoint(skills), commands & skills
