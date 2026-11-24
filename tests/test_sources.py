@@ -55,7 +55,39 @@ def test_symlinked_skill_followed_and_broken_symlink_skipped(env, tmp_path):
     (skills / "broken").symlink_to(tmp_path / "missing")
     result = sources.user_skills(env.claude_home)
     assert [s.invoke for s in result] == ["linked"]
-    assert not (env.data / "errors.log").exists()
+    lines = (env.data / "errors.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and str(skills / "broken") in lines[0] and "broken skill directory symlink" in lines[0]
+
+
+def test_dangling_skill_md_symlink_logged_once_and_skipped(env, tmp_path):
+    root = env.claude_home / "skills"
+    make_skill(root, "good", "description: d")
+    (root / "dangling").mkdir()
+    (root / "dangling" / "SKILL.md").symlink_to(tmp_path / "missing.md")
+    assert [s.invoke for s in sources.user_skills(env.claude_home)] == ["good"]
+    sources.user_skills(env.claude_home)
+    lines = (env.data / "errors.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert str(root / "dangling" / "SKILL.md") in lines[0] and "broken SKILL.md symlink" in lines[0]
+
+
+def test_log_escapes_special_characters_in_paths(env):
+    root = env.claude_home / "skills"
+    for name in ("tab\there", "new\nline"):
+        (root / name).mkdir(parents=True)
+        (root / name / "SKILL.md").write_text("no frontmatter", encoding="utf-8")
+    sources.user_skills(env.claude_home)
+    sources.user_skills(env.claude_home)
+    lines = (env.data / "errors.log").read_text(encoding="utf-8").split("\n")
+    assert len(lines) == 3 and lines[2] == ""
+    assert all(len(line.split("\t")) == 4 for line in lines[:2])
+    assert any("tab\\there" in line for line in lines)
+
+
+def test_non_string_description_has_accurate_reason(env):
+    make_skill(env.claude_home / "skills", "listy", "description: [a, b]")
+    assert sources.user_skills(env.claude_home) == []
+    assert "description is not a string" in (env.data / "errors.log").read_text(encoding="utf-8")
 
 
 def test_missing_skills_dir_is_empty(env):
@@ -124,6 +156,39 @@ def test_multiple_installs_prefers_latest_user_scope(env, tmp_path):
         {"scope": "user", "installPath": str(old), "lastUpdated": "2026-01-01T00:00:00Z"},
     ]})
     assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["sp:new"]
+
+
+def test_last_updated_compared_as_timestamps(env, tmp_path):
+    # Raw string comparison would pick "...00Z" over "...00.5+00:00" ('Z' > '.'), and the +02:00 entry
+    # looks latest as text but is the oldest instant.
+    fractional = make_plugin(tmp_path, "sp", "frac", dirs=("frac",))
+    zulu = make_plugin(tmp_path, "sp", "zulu", dirs=("zulu",))
+    offset = make_plugin(tmp_path, "sp", "off", dirs=("off",))
+    junk = make_plugin(tmp_path, "sp", "junk", dirs=("junk",))
+    install(env, {"sp@m": [
+        {"scope": "user", "installPath": str(zulu), "lastUpdated": "2026-03-01T00:00:00Z"},
+        {"scope": "user", "installPath": str(fractional), "lastUpdated": "2026-03-01T00:00:00.500+00:00"},
+        {"scope": "user", "installPath": str(offset), "lastUpdated": "2026-03-01T01:00:00+02:00"},
+        {"scope": "user", "installPath": str(junk), "lastUpdated": "zzz-not-a-date"},
+    ]})
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["sp:frac"]
+
+
+def test_unparseable_last_updated_sorts_oldest(env, tmp_path):
+    old = make_plugin(tmp_path, "sp", "old", dirs=("old",))
+    junk = make_plugin(tmp_path, "sp", "junk", dirs=("junk",))
+    install(env, {"sp@m": [
+        {"scope": "user", "installPath": str(junk), "lastUpdated": "garbage"},
+        {"scope": "user", "installPath": str(old), "lastUpdated": "2020-01-01T00:00:00Z"},
+    ]})
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["sp:old"]
+
+
+def test_plugin_id_without_at_sign(env, tmp_path):
+    root = make_plugin(tmp_path, "solo", "1.0", dirs=("thing",))
+    install(env, {"solo": [{"scope": "user", "installPath": str(root)}]})
+    [skill] = sources.plugin_skills(env.claude_home)
+    assert (skill.invoke, skill.plugin_id) == ("solo:thing", "solo")
 
 
 def test_plugin_with_missing_install_path_skipped(env, tmp_path):

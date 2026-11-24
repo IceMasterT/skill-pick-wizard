@@ -1,6 +1,7 @@
 """Discovery of user, project and plugin skills, and enabled-plugin resolution."""
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,15 +21,40 @@ class Skill:
     tags: tuple[str, ...] = ()
 
 
+_ESCAPES = {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
+
+
+def _encode(field: str) -> str:
+    """Escape backslash, tab, newline and CR so a field never breaks the tab/newline line format."""
+    return "".join(_ESCAPES.get(ch, ch) for ch in field)
+
+
+def _timestamp(value) -> float:
+    """Seconds since the epoch for an ISO-8601 string; unparseable values sort oldest."""
+    if not isinstance(value, str):
+        return float("-inf")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 class _ErrorLog:
-    """Append-only errors.log; one line per (path, mtime_ns, reason), read once per discovery run."""
+    """Append-only errors.log; one line per (path, mtime_ns, reason), read once per discovery run.
+
+    Fields are backslash-escaped on write (see _encode); keys are compared in encoded form, which is
+    equivalent to comparing decoded values because the encoding is injective.
+    """
 
     def __init__(self) -> None:
         self._file = None
         self._seen: set[tuple[str, str, str]] = set()
         try:
             self._file = data_dir() / "errors.log"
-            for line in self._file.read_text(encoding="utf-8").splitlines():
+            for line in self._file.read_text(encoding="utf-8").split("\n"):
                 parts = line.split("\t")
                 if len(parts) == 4:
                     self._seen.add((parts[1], parts[2], parts[3]))
@@ -40,14 +66,14 @@ class _ErrorLog:
             mtime = str(path.stat().st_mtime_ns)
         except OSError:
             mtime = "missing"
-        key = (str(path), mtime, reason)
+        key = (_encode(str(path)), mtime, _encode(reason))
         if self._file is None or key in self._seen:
             return
         self._seen.add(key)
         try:
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             with open(self._file, "a", encoding="utf-8") as fh:
-                fh.write(f"{stamp}\t{path}\t{mtime}\t{reason}\n")
+                fh.write(f"{stamp}\t{key[0]}\t{mtime}\t{key[2]}\n")
         except OSError:
             pass  # logging must never break discovery
 
@@ -65,7 +91,10 @@ def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
         errors.log(skill_md, "no frontmatter")
         return None
     description = fm.get("description")
-    if not isinstance(description, str) or not description.strip():
+    if description is not None and not isinstance(description, str):
+        errors.log(skill_md, "description is not a string")
+        return None
+    if description is None or not description.strip():
         errors.log(skill_md, "empty description")
         return None
     name = fm.get("name")
@@ -82,16 +111,27 @@ def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
     )
 
 
-def _skill_mds(skills_root: Path) -> list[Path]:
-    """SKILL.md files directly under each child of skills_root (symlinks followed, dangling ones skipped)."""
+def _skill_mds(skills_root: Path, errors: _ErrorLog | None = None) -> list[Path]:
+    """SKILL.md files directly under each child of skills_root (symlinks followed).
+
+    Dangling symlinks (a skill directory or its SKILL.md) are skipped, and logged when `errors` is given.
+    """
     try:
         children = sorted(skills_root.iterdir())
     except OSError:
         return []
     found = []
     for child in children:
+        if child.is_symlink() and not child.exists():
+            if errors:
+                errors.log(child, "broken skill directory symlink")
+            continue
         md = child / "SKILL.md"
-        if child.exists() and md.is_file():
+        if md.is_symlink() and not md.exists():
+            if errors:
+                errors.log(md, "broken SKILL.md symlink")
+            continue
+        if md.is_file():
             found.append(md)
     return found
 
@@ -100,7 +140,7 @@ def _read_dir(skills_root: Path, source: str, prefix: str = "", plugin_id: str |
               errors: _ErrorLog | None = None) -> list[Skill]:
     errors = errors or _ErrorLog()
     skills = []
-    for md in _skill_mds(skills_root):
+    for md in _skill_mds(skills_root, errors):
         skill = read_skill(md, prefix + md.parent.name, source, plugin_id, errors)
         if skill:
             skills.append(skill)
@@ -149,8 +189,7 @@ def _plugin_roots(claude_home: Path, cwd: Path | None) -> list[tuple[str, Path]]
             install = entry.get("installPath")
             if not isinstance(install, str) or not Path(install).is_dir():
                 continue
-            updated = entry.get("lastUpdated")
-            key = updated if isinstance(updated, str) else ""
+            key = _timestamp(entry.get("lastUpdated"))
             if best is None or key > best[0]:
                 best = (key, Path(install))
         if best:
