@@ -3,6 +3,8 @@
 Date: 2026-11-23
 Status: draft, builder-checked, awaiting approval
 
+> **Rename note:** the flow skill ships as `pick-skills` (invoked as `skill-pick-wizard:pick-skills`), because a skill named `skill-pick` collided with the `/skill-pick` command. Mentions of the `skill-pick` skill below mean `pick-skills`.
+
 ## Intent
 
 The user has about 1,086 skills installed. Claude regularly uses about 3 of them; the rest are never picked, even when they fit the job.

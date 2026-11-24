@@ -3,9 +3,11 @@ name: pick-skills
 description: Use when the Skill Pick Wizard hook says a skill scan is pending, or when /autopick or /skill-pick runs. Picks the installed skills that fit the job by their full descriptions, asks for approval when the mode says so, saves the plan, and starts the job with the first stage's skills.
 ---
 
-# Skill Pick
+# Pick Skills
 
 Most installed skills are visible to you only by name. This flow finds the ones that fit the job by their full descriptions, gets them approved when the mode asks for it, and makes sure you actually use them for the whole job.
+
+If this conversation already has a `Skill plan not saved` notice for the current job (step 6.7), keep following the list already shown and do not run this flow again.
 
 Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list, the questions and the one-line notices named below. Do none of the job's own work before step 7.
 
@@ -115,8 +117,8 @@ Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<
 
    `<mode used>` is `approve`, `show` or `silent`. Add `--deep-scan` when the deep scan ran.
 4. It prints `saved plan: <n> stages` on success.
-5. If it prints `unknown skills: <list>`, replace each listed skill with an alternative of the same stage that came from the search output (those are always known), or drop it, and run `save-plan` again. Tell the user in one line only if the approved list changed.
-6. If it prints an error starting with `invalid --plan`, rebuild the JSON to the shape in item 2 (a non-empty list; each item has a non-empty `"stage"` string and a non-empty `"skills"` list of strings), check the quoting, and run `save-plan` again.
+5. If it prints `unknown skills: <list>`, replace each listed skill with an alternative of the same stage that came from the search output (those are always known), or drop it, and run `save-plan` again. Tell the user in one line only if the approved list changed. If dropping them leaves the list empty, go to item 1 instead of running `save-plan` again.
+6. If it prints an error starting with `invalid --plan`, or an argument error such as `unrecognized arguments` or `expected one argument` (usually a quoting slip), rebuild the JSON to the shape in item 2 (a non-empty list; each item has a non-empty `"stage"` string and a non-empty `"skills"` list of strings), check the quoting, and run `save-plan` again.
 7. Retry at most twice in total (items 5 and 6 together). If it still fails, or it fails with any other error, the plan is not saved:
    1. Run `<pick> skip`, so the hook does not start a new skill scan on every message.
    2. If the skip worked, say in one line: `Skill plan not saved (<error>). Later messages will not show it as a reminder; run /skill-pick to try again.`

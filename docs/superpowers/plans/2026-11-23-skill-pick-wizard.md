@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Rename note:** the flow skill ships as `pick-skills` (invoked as `skill-pick-wizard:pick-skills`), because a skill named `skill-pick` collided with the `/skill-pick` command. Mentions of the `skill-pick` skill below mean `pick-skills`.
+
 **Goal:** A Claude Code plugin that, at the start of each job, searches every installed skill by full description, recommends the best ones grouped by job stage (approve / show / silent modes, optional deep scan), and keeps the approved picks in effect for the whole job.
 
 **Architecture:** A `UserPromptSubmit` hook reads only small state files and injects context that tells Claude to run the plugin's `skill-pick` skill. That skill drives a stdlib-Python CLI (`scripts/pick.py`). The CLI maintains a SQLite FTS5 index of user, project and plugin skills (plus Obsidian vault area tags), answers multi-query searches, writes deep-scan catalog chunks for parallel read-only helper agents, and stores per-session plans. Slash commands are thin markdown prompts over the same CLI.

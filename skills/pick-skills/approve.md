@@ -1,4 +1,4 @@
-# Skill Pick: approve mode
+# Pick Skills: approve mode
 
 Read this only in approve mode, after showing the list (SKILL.md step 5). `<pick>`, `<cwd>`, the `--session` rule, the list format and the alternatives are as defined in SKILL.md.
 
@@ -49,7 +49,7 @@ If the list has no skills, say in one line that there is nothing to swap and ask
 
    **Ask** `Replace <invoke> with?` (header `Replace`) with these options:
    - Up to 3 of that stage's alternatives (label: the invoke, description: a short version of what it does)
-   - `Keep it`: Leave this skill in the plan
+   - `Keep it`: Leave this skill in the plan (or type "drop" in "Other" to remove it)
 
    Text typed in "Other": if it asks to remove or drop the skill, drop it. Otherwise resolve it with **Typed text**. If the stage has no alternatives left, the only option is `Keep it`, so the question is not asked: say in one line that this stage has no alternatives left and that the user can, in "Other" on the main question, name a skill to use instead or ask to drop this one.
 
