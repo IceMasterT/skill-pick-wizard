@@ -82,6 +82,27 @@ def test_bad_files_skipped_and_logged(env):
         assert any(str(root / name / "SKILL.md") in line for line in lines)
 
 
+def test_bad_files_logged_once_until_changed(env):
+    root = env.claude_home / "skills"
+    for name in ("a", "b"):
+        (root / name).mkdir(parents=True)
+        (root / name / "SKILL.md").write_text("no frontmatter", encoding="utf-8")
+    binary = root / "c"
+    binary.mkdir()
+    (binary / "SKILL.md").write_bytes(b"\xff\xfe\x00")
+    log = env.data / "errors.log"
+    sources.user_skills(env.claude_home)
+    sources.user_skills(env.claude_home)
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 3
+    md = root / "a" / "SKILL.md"
+    stat = md.stat()
+    os.utime(md, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000))
+    sources.user_skills(env.claude_home)
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4
+    assert sum(str(md) in line for line in lines) == 2
+
+
 def test_project_skills(env):
     make_skill(env.cwd / ".claude" / "skills", "mine", "description: d")
     [skill] = sources.project_skills(env.cwd)

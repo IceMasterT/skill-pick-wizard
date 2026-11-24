@@ -20,28 +20,53 @@ class Skill:
     tags: tuple[str, ...] = ()
 
 
-def _log_error(path: Path, reason: str) -> None:
-    try:
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with open(data_dir() / "errors.log", "a", encoding="utf-8") as fh:
-            fh.write(f"{stamp}\t{path}\t{reason}\n")
-    except OSError:
-        pass  # logging must never break discovery
+class _ErrorLog:
+    """Append-only errors.log; one line per (path, mtime_ns, reason), read once per discovery run."""
+
+    def __init__(self) -> None:
+        self._file = None
+        self._seen: set[tuple[str, str, str]] = set()
+        try:
+            self._file = data_dir() / "errors.log"
+            for line in self._file.read_text(encoding="utf-8").splitlines():
+                parts = line.split("\t")
+                if len(parts) == 4:
+                    self._seen.add((parts[1], parts[2], parts[3]))
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    def log(self, path: Path, reason: str) -> None:
+        try:
+            mtime = str(path.stat().st_mtime_ns)
+        except OSError:
+            mtime = "missing"
+        key = (str(path), mtime, reason)
+        if self._file is None or key in self._seen:
+            return
+        self._seen.add(key)
+        try:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with open(self._file, "a", encoding="utf-8") as fh:
+                fh.write(f"{stamp}\t{path}\t{mtime}\t{reason}\n")
+        except OSError:
+            pass  # logging must never break discovery
 
 
-def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None) -> Skill | None:
+def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
+               errors: _ErrorLog | None = None) -> Skill | None:
+    errors = errors or _ErrorLog()
     try:
         text = skill_md.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        _log_error(skill_md, f"unreadable: {type(exc).__name__}")
+        errors.log(skill_md, f"unreadable: {type(exc).__name__}")
         return None
     fm = parse_frontmatter(text)
     if not fm:
-        _log_error(skill_md, "no frontmatter")
+        errors.log(skill_md, "no frontmatter")
         return None
     description = fm.get("description")
     if not isinstance(description, str) or not description.strip():
-        _log_error(skill_md, "empty description")
+        errors.log(skill_md, "empty description")
         return None
     name = fm.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -71,10 +96,12 @@ def _skill_mds(skills_root: Path) -> list[Path]:
     return found
 
 
-def _read_dir(skills_root: Path, source: str, prefix: str = "", plugin_id: str | None = None) -> list[Skill]:
+def _read_dir(skills_root: Path, source: str, prefix: str = "", plugin_id: str | None = None,
+              errors: _ErrorLog | None = None) -> list[Skill]:
+    errors = errors or _ErrorLog()
     skills = []
     for md in _skill_mds(skills_root):
-        skill = read_skill(md, prefix + md.parent.name, source, plugin_id)
+        skill = read_skill(md, prefix + md.parent.name, source, plugin_id, errors)
         if skill:
             skills.append(skill)
     return skills
@@ -133,9 +160,10 @@ def _plugin_roots(claude_home: Path, cwd: Path | None) -> list[tuple[str, Path]]
 
 def _plugin_skills(claude_home: Path, cwd: Path | None) -> list[Skill]:
     skills = []
+    errors = _ErrorLog()
     for plugin_id, root in _plugin_roots(claude_home, cwd):
         prefix = plugin_id.split("@", 1)[0] + ":"
-        skills.extend(_read_dir(root / "skills", "plugin", prefix, plugin_id))
+        skills.extend(_read_dir(root / "skills", "plugin", prefix, plugin_id, errors))
     return skills
 
 
