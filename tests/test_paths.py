@@ -27,3 +27,10 @@ def test_project_key_stable(tmp_path):
     assert len(key) == 16
     assert paths.project_key(a) != paths.project_key(b)
     assert paths.project_key(a / ".." / "a") == key
+
+
+def test_data_dir_created_private(tmp_path, monkeypatch):
+    target = tmp_path / "fresh" / "data"
+    monkeypatch.setenv("SKILL_PICK_WIZARD_HOME", str(target))
+    assert paths.data_dir() == target
+    assert target.stat().st_mode & 0o777 == 0o700

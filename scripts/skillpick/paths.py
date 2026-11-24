@@ -12,7 +12,7 @@ def claude_home() -> Path:
 def data_dir() -> Path:
     override = os.environ.get("SKILL_PICK_WIZARD_HOME")
     path = Path(override) if override else Path.home() / ".local" / "share" / "skill-pick-wizard"
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
     return path
 
 
