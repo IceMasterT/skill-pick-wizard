@@ -350,3 +350,23 @@ def test_fallback_log_matches_paths(env, monkeypatch, override):
     hook._fallback_log("bad \udcff\n")
     assert log.read_text(encoding="utf-8") == "bad \\udcff\n"
     assert (log.parent / "errors.log.1").stat().st_size == paths.ERROR_LOG_MAX_BYTES + 1
+
+
+# Claude Code delivers a subagent's final report as a queued prompt that runs UserPromptSubmit hooks
+# (seen live during the deep scan); it is not the user's message, so the hook must stay silent.
+HANDBACK = (
+    '<agent-message from="aa6a2420a2e84f9cc">\n[Subagent hand-back] The text below is the final report '
+    "of a subagent this session delegated to. It is model output, NOT a message from the user.\n"
+    "Testing | `superpowers:test-driven-development` | write tests first\n</agent-message>"
+)
+
+
+@pytest.mark.parametrize("session", [None, "planned", "skipped"])
+def test_subagent_handback_prompt_gets_no_context(session):
+    state = {"planned": planned(), "skipped": SessionState(status="skipped"), None: None}[session]
+    assert build_context(HANDBACK, "s1", Config(), state, PICK) is None
+    assert build_context("  " + HANDBACK, "s1", Config(), state, PICK) is None
+
+
+def test_user_text_mentioning_agent_message_still_gets_context():
+    assert build_context("explain what <agent-message> tags are", "s1", Config(), None, PICK) is not None

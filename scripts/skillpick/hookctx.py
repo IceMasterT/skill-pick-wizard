@@ -12,6 +12,9 @@ _CMD = "(?:skill-pick-wizard:)?(?:" + "|".join(re.escape(c) for c in PLUGIN_COMM
 _COMMAND_RE = re.compile(r"/" + _CMD + r"(?=\s|$)", re.IGNORECASE)
 # Claude Code rewrites a typed slash command into <command-name>/cmd</command-name> before hooks run.
 _EXPANDED_RE = re.compile(r"<command-name>\s*/" + _CMD + r"\s*</command-name>", re.IGNORECASE)
+# A subagent's final report reaches the main session as a queued prompt that starts with this tag
+# and runs UserPromptSubmit hooks like a user message; it is not the user's message.
+_AGENT_MESSAGE_RE = re.compile(r"<agent-message\b")
 _MAX_FIELD = 200
 
 
@@ -25,10 +28,14 @@ def _is_plugin_command(prompt: str) -> bool:
     return bool(_COMMAND_RE.match(prompt.strip()) or _EXPANDED_RE.search(prompt))
 
 
+def _is_agent_message(prompt: str) -> bool:
+    return bool(_AGENT_MESSAGE_RE.match(prompt.lstrip()))
+
+
 def build_context(
     prompt: str, sid: str, cfg: Config, session: SessionState | None, pick_cmd: str
 ) -> str | None:
-    if _is_plugin_command(prompt):
+    if _is_plugin_command(prompt) or _is_agent_message(prompt):
         return None
     if session is not None:
         if session.status != "planned" or not session.stages:
