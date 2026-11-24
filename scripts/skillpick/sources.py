@@ -198,17 +198,71 @@ def _load_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _plugin_roots(claude_home: Path, cwd: Path | None) -> list[tuple[str, Path]]:
-    """(plugin_id, install dir) per plugin: user-scope installs when cwd is None, else installs scoped to cwd."""
+def _directory_source_root(claude_home: Path, plugin_id: str, known: dict, errors: _ErrorLog) -> Path | None:
+    """The folder Claude Code loads a plugin from when its marketplace is a local directory.
+
+    For a "directory" marketplace (known_marketplaces.json `source.source == "directory"`) that is
+    `installLocation` joined with the plugin's relative `source` in that marketplace's
+    .claude-plugin/marketplace.json; the installPath cache copy goes stale when the folder is
+    edited. None means "use installPath": always for other marketplace types, and, logged once,
+    whenever the directory source cannot be resolved to a folder inside installLocation.
+    """
+    known_file = claude_home / "plugins" / "known_marketplaces.json"
+    name, _, marketplace = plugin_id.partition("@")
+
+    def fallback(path: Path, why: str) -> None:
+        errors.log(path, f"plugin {plugin_id}: {why}; falling back to installPath")
+
+    entry = known.get(marketplace) if marketplace else None
+    if not isinstance(entry, dict) or not isinstance(entry.get("source"), dict):
+        fallback(known_file, "no marketplace entry in known_marketplaces.json")
+        return None
+    if entry["source"].get("source") != "directory":
+        return None
+    location = entry.get("installLocation")
+    if not isinstance(location, str) or not location:
+        fallback(known_file, "directory marketplace has no installLocation")
+        return None
+    manifest = Path(location) / ".claude-plugin" / "marketplace.json"
+    listed = _load_json(manifest).get("plugins")
+    match = next((p for p in listed if isinstance(p, dict) and p.get("name") == name), None) \
+        if isinstance(listed, list) else None
+    if match is None:
+        fallback(manifest, "not listed in marketplace.json")
+        return None
+    source = match.get("source")
+    if not isinstance(source, str) or not source or Path(source).is_absolute():
+        fallback(manifest, "source is not a relative path")
+        return None
+    try:
+        base = Path(location).resolve(strict=True)
+        root = (base / source).resolve(strict=True)
+    except (OSError, RuntimeError):
+        fallback(manifest, f"source {source!r} does not exist")
+        return None
+    if not root.is_dir() or not root.is_relative_to(base):
+        fallback(manifest, f"source {source!r} is not a folder inside the marketplace")
+        return None
+    return root
+
+
+def _plugin_roots(claude_home: Path, cwd: Path | None, errors: _ErrorLog | None = None) -> list[tuple[str, Path]]:
+    """(plugin_id, root dir) per plugin: user-scope installs when cwd is None, else installs scoped to cwd.
+
+    The root is the directory-marketplace source folder when there is one (see
+    _directory_source_root), otherwise the most recently updated install's installPath.
+    """
     plugins = _load_json(claude_home / "plugins" / "installed_plugins.json").get("plugins")
     if not isinstance(plugins, dict):
         return []
+    errors = errors or _ErrorLog()
+    known = _load_json(claude_home / "plugins" / "known_marketplaces.json")
     project = str(Path(cwd).resolve()) if cwd is not None else None
     roots = []
     for plugin_id, entries in sorted(plugins.items()):
         if not isinstance(entries, list):
             continue
-        best = None
+        scoped = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -221,6 +275,15 @@ def _plugin_roots(claude_home: Path, cwd: Path | None) -> list[tuple[str, Path]]
                 path = entry.get("projectPath")
                 if not isinstance(path, str) or str(Path(path).resolve()) != project:
                     continue
+            scoped.append(entry)
+        if not scoped:
+            continue
+        source_root = _directory_source_root(claude_home, plugin_id, known, errors)
+        if source_root is not None:
+            roots.append((plugin_id, source_root))
+            continue
+        best = None
+        for entry in scoped:
             install = entry.get("installPath")
             if not isinstance(install, str) or not Path(install).is_dir():
                 continue
@@ -235,7 +298,7 @@ def _plugin_roots(claude_home: Path, cwd: Path | None) -> list[tuple[str, Path]]
 def _plugin_skills(claude_home: Path, cwd: Path | None) -> list[Skill]:
     skills = []
     errors = _ErrorLog()
-    for plugin_id, root in _plugin_roots(claude_home, cwd):
+    for plugin_id, root in _plugin_roots(claude_home, cwd, errors):
         prefix = plugin_id.split("@", 1)[0] + ":"
         skills.extend(_read_dir(root / "skills", "plugin", prefix, plugin_id, errors))
     return skills
@@ -263,11 +326,13 @@ def enabled_plugin_ids(claude_home: Path, cwd: Path) -> set[str]:
 
 
 def skill_files(claude_home: Path) -> list[Path]:
-    """Global fingerprint inputs: every SKILL.md read for user/plugin skills plus the two global JSON files."""
+    """Global fingerprint inputs: every SKILL.md read for user/plugin skills (from each plugin's resolved
+    root, so edits in a directory marketplace's folder trigger a rebuild) plus the global JSON files."""
     files = _skill_mds(claude_home / "skills")
     for _, root in _plugin_roots(claude_home, None):
         files.extend(_skill_mds(root / "skills"))
-    files += [claude_home / "settings.json", claude_home / "plugins" / "installed_plugins.json"]
+    files += [claude_home / "settings.json", claude_home / "plugins" / "installed_plugins.json",
+              claude_home / "plugins" / "known_marketplaces.json"]
     return files
 
 

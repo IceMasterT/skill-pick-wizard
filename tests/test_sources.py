@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from conftest import make_skill
 from skillpick import sources
 
@@ -328,3 +329,118 @@ def test_skills_claude_may_not_invoke_are_left_out(env):
     make_skill(root, "plain", "description: d")
     assert [s.invoke for s in sources.user_skills(env.claude_home)] == sorted([*shown, "plain"])
     assert not (env.data / "errors.log").exists()  # a deliberate setting, not an error
+
+
+# Plugins from a "directory" marketplace: Claude Code loads them from the marketplace folder,
+# not from the installPath cache copy (which goes stale when the folder is edited).
+def _known(env, marketplaces: dict) -> None:
+    write_json(env.claude_home / "plugins" / "known_marketplaces.json", marketplaces)
+
+
+def _dir_marketplace(tmp_path: Path, plugins: list, name: str = "local") -> Path:
+    loc = tmp_path / f"{name}-market"
+    write_json(loc / ".claude-plugin" / "marketplace.json", {"name": name, "plugins": plugins})
+    return loc
+
+
+def _dir_setup(env, tmp_path, source, skill_dirs=("fresh",), plugin="wiz"):
+    """A cached install with a stale skill, plus a directory marketplace whose source holds others."""
+    cache = make_plugin(tmp_path / "cache", plugin, "0.1.0", dirs=("stale",))
+    loc = _dir_marketplace(tmp_path, [{"name": "other", "source": "./nope"}, {"name": plugin, "source": source}])
+    install(env, {f"{plugin}@local": [{"scope": "user", "installPath": str(cache)}]})
+    _known(env, {"local": {"source": {"source": "directory", "path": str(loc)}, "installLocation": str(loc)}})
+    return cache, loc
+
+
+def _logged(env) -> str:
+    log = env.data / "errors.log"
+    return log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+def test_directory_marketplace_plugin_is_read_from_its_source_folder(env, tmp_path):
+    cache, loc = _dir_setup(env, tmp_path, "./")
+    for d in ("fresh", "pick-skills"):
+        make_skill(loc / "skills", d, f"description: {d} desc")
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:fresh", "wiz:pick-skills"]
+    assert all(str(loc) in s.path for s in sources.plugin_skills(env.claude_home))
+    assert _logged(env) == ""
+
+
+def test_directory_marketplace_nested_relative_source(env, tmp_path):
+    cache, loc = _dir_setup(env, tmp_path, "plugins/wiz")
+    make_skill(loc / "plugins" / "wiz" / "skills", "nested", "description: nested desc")
+    make_skill(loc / "skills", "top-level", "description: not this plugin's")
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:nested"]
+
+
+@pytest.mark.parametrize("source", ["../x", "/abs/elsewhere", "plugins/../../x", "./missing", 42, ""])
+def test_directory_source_that_is_invalid_falls_back_to_install_path_and_logs_once(env, tmp_path, source):
+    (tmp_path / "x" / "skills").mkdir(parents=True)  # "../x" exists but is outside the marketplace
+    make_skill(tmp_path / "x" / "skills", "escaped", "description: must not be read")
+    _dir_setup(env, tmp_path, source)
+    for _ in range(2):
+        assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:stale"]
+        sources.skill_files(env.claude_home)
+    lines = [l for l in _logged(env).splitlines() if "wiz@local" in l]
+    assert len(lines) == 1 and "falling back to installPath" in lines[0]
+
+
+def test_directory_symlink_escaping_the_marketplace_falls_back(env, tmp_path):
+    outside = tmp_path / "outside"
+    make_skill(outside / "skills", "escaped", "description: must not be read")
+    cache, loc = _dir_setup(env, tmp_path, "./link")
+    (loc / "link").symlink_to(outside)
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:stale"]
+    assert "wiz@local" in _logged(env)
+
+
+def test_directory_marketplace_without_marketplace_json_falls_back(env, tmp_path):
+    cache, loc = _dir_setup(env, tmp_path, "./")
+    (loc / ".claude-plugin" / "marketplace.json").unlink()
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:stale"]
+    assert "wiz@local" in _logged(env)
+
+
+def test_plugin_missing_from_marketplace_json_or_known_marketplaces_falls_back(env, tmp_path):
+    cache, loc = _dir_setup(env, tmp_path, "./", plugin="wiz")
+    write_json(loc / ".claude-plugin" / "marketplace.json", {"plugins": [{"name": "someone-else", "source": "./"}]})
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:stale"]
+    _known(env, {})
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:stale"]
+    assert len([l for l in _logged(env).splitlines() if "wiz@local" in l]) == 2  # two different reasons
+
+
+@pytest.mark.parametrize("source", [{"source": "github", "repo": "o/r"}, {"source": "git", "url": "https://x"}])
+def test_non_directory_marketplace_uses_install_path(env, tmp_path, source):
+    cache = make_plugin(tmp_path / "cache", "gh", "1.0", dirs=("cached",))
+    loc = _dir_marketplace(tmp_path, [{"name": "gh", "source": "./"}], name="remote")
+    make_skill(loc / "skills", "source-copy", "description: not loaded for remote marketplaces")
+    install(env, {"gh@remote": [{"scope": "user", "installPath": str(cache)}]})
+    _known(env, {"remote": {"source": source, "installLocation": str(loc)}})
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["gh:cached"]
+    assert _logged(env) == ""
+
+
+def test_directory_source_plugin_with_object_source_falls_back(env, tmp_path):
+    _dir_setup(env, tmp_path, {"source": "github", "repo": "o/r"})
+    assert [s.invoke for s in sources.plugin_skills(env.claude_home)] == ["wiz:stale"]
+    assert "wiz@local" in _logged(env)
+
+
+def test_project_scoped_directory_plugin_uses_source_folder(env, tmp_path):
+    cache, loc = _dir_setup(env, tmp_path, "./")
+    make_skill(loc / "skills", "fresh", "description: fresh desc")
+    install(env, {"wiz@local": [{"scope": "project", "projectPath": str(env.cwd), "installPath": str(cache)}]})
+    assert [s.invoke for s in sources.project_plugin_skills(env.claude_home, env.cwd)] == ["wiz:fresh"]
+    assert str(loc / "skills" / "fresh" / "SKILL.md") in map(str, sources.project_skill_files(env.claude_home, env.cwd))
+
+
+def test_fingerprint_inputs_follow_the_source_folder(env, tmp_path):
+    from skillpick.index import fingerprint
+    cache, loc = _dir_setup(env, tmp_path, "./")
+    make_skill(loc / "skills", "fresh", "description: fresh desc")
+    before = fingerprint(sources.skill_files(env.claude_home))
+    assert str(loc / "skills" / "fresh" / "SKILL.md") in map(str, sources.skill_files(env.claude_home))
+    assert not any("stale" in str(p) for p in sources.skill_files(env.claude_home))
+    make_skill(loc / "skills", "added-later", "description: new desc")
+    assert fingerprint(sources.skill_files(env.claude_home)) != before
