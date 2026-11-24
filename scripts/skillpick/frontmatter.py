@@ -151,3 +151,9 @@ def _inline_list(s: str) -> list[str]:
         if item:
             items.append(item)
     return items
+
+
+def tag_list(value) -> tuple[str, ...]:
+    """Normalise a parsed `tags` value (list or comma-separated string) to a tuple."""
+    items = value.split(",") if isinstance(value, str) else (value or [])
+    return tuple(t.strip() for t in items if t.strip())
