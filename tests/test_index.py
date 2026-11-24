@@ -482,3 +482,23 @@ def test_segment_is_the_final_tie_break(tmp_path):
     for queries in (["beta", "alpha"], ["alpha", "beta"]):
         hits = i.search(queries)
         assert [h.skill.description for h in hits] == ["alpha", "beta"], queries  # "global" < "project:a"
+
+
+def test_reset_deletes_the_database_and_its_side_files(idx):
+    for suffix in ("-wal", "-shm", "-journal"):
+        idx.db_path.with_name(idx.db_path.name + suffix).write_bytes(b"x")
+    idx.reset()
+    assert sorted(p.name for p in idx.db_path.parent.iterdir()) == []
+    assert idx.count() == 0  # usable again: a fresh, empty index
+
+
+def test_is_corruption_only_for_corrupt_files(tmp_path):
+    import sqlite3
+    from skillpick.index import is_corruption
+    db = tmp_path / "junk.db"
+    db.write_bytes(os.urandom(4096))
+    with pytest.raises(sqlite3.DatabaseError) as info:
+        SkillIndex(db).count()
+    assert is_corruption(info.value)
+    assert not is_corruption(sqlite3.OperationalError("database is locked"))
+    assert not is_corruption(sqlite3.IntegrityError("UNIQUE constraint failed"))

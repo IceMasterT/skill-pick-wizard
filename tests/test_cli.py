@@ -217,3 +217,44 @@ def test_search_limit_scales_with_query_count(env, capsys):
     assert _count_hits(repeated[1]) == 30  # duplicate queries count once
     explicit = run(capsys, "search", "--cwd", str(env.cwd), "--limit", "3", *queries)
     assert _count_hits(explicit[1]) == 3
+
+
+def test_search_and_index_recover_from_a_corrupt_index(env, capsys):
+    import os
+    seed(env)
+    assert run(capsys, "index", "--cwd", str(env.cwd))[0] == 0
+    [db] = [p for p in (env.data / "index").iterdir() if p.suffix == ".sqlite"]
+    db.write_bytes(os.urandom(8192))
+    code, out, err = run(capsys, "search", "--cwd", str(env.cwd), "failing test first")
+    assert (code, err) == (0, "") and out.startswith("`test-driven-development`")
+    db.write_bytes(os.urandom(8192))
+    assert run(capsys, "index", "--cwd", str(env.cwd)) == (0, "global: 2 skills, project: 0 skills\nsearchable: 2\n", "")
+
+
+def test_save_plan_rejects_a_skill_claude_may_not_invoke(env, capsys):
+    seed(env)
+    make_skill(env.claude_home / "skills", "user-only", "description: explore ideas\ndisable-model-invocation: true")
+    plan = json.dumps([{"stage": "Planning", "skills": ["brainstorming", "user-only"]}])
+    code, _, err = run(capsys, "save-plan", "--session", "s1", "--job", "j", "--plan", plan)
+    assert (code, err) == (2, "unknown skills: user-only\n")
+    assert "user-only" not in run(capsys, "search", "--cwd", str(env.cwd), "explore ideas")[1]
+
+
+@pytest.mark.parametrize(
+    "error, line",
+    [
+        (lambda: __import__("sqlite3").OperationalError("database is locked"), "index error: database is locked\n"),
+        (lambda: PermissionError(13, "Permission denied", "/data/index"),
+         "file error: [Errno 13] Permission denied: '/data/index'\n"),
+        (lambda: OSError("disk\nfull"), "file error: disk full\n"),
+    ],
+)
+def test_unexpected_index_and_file_errors_are_one_line(env, capsys, monkeypatch, error, line):
+    from skillpick import service
+
+    def boom(*args, **kwargs):
+        raise error()
+
+    monkeypatch.setattr(service, "search", boom)
+    code, out, err = run(capsys, "search", "--cwd", str(env.cwd), "q")
+    assert (code, out, err) == (2, "", line)

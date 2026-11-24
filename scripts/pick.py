@@ -9,6 +9,7 @@ if sys.version_info < (3, 10):
 import argparse  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import sqlite3  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -248,9 +249,20 @@ def main(argv=None) -> int:
     try:
         args.func(args)
     except UserError as exc:
-        print(str(exc), file=sys.stderr)
+        _fail(str(exc))
+        return 2
+    except sqlite3.Error as exc:
+        _fail(f"index error: {exc}")
+        return 2
+    except OSError as exc:
+        _fail(f"file error: {exc}")
         return 2
     return 0
+
+
+def _fail(message: str) -> None:
+    """One stderr line, so the flow can quote the error back in one line."""
+    print(" ".join(message.splitlines()), file=sys.stderr)
 
 
 if __name__ == "__main__":

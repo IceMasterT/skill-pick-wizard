@@ -1,10 +1,13 @@
 """Glue between discovery, the SQLite indexes and the CLI: fresh indexes, search, allowed skills."""
+import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import TypeVar
 
 from . import vault
-from .index import Hit, SkillIndex, fingerprint
+from .index import Hit, SkillIndex, fingerprint, index_path, is_corruption
 from .paths import project_key
 from .sources import (
     Skill,
@@ -17,6 +20,8 @@ from .sources import (
     user_skills,
 )
 from .state import Config
+
+T = TypeVar("T")
 
 
 def _vault_dir(cfg: Config) -> Path:
@@ -43,7 +48,7 @@ def fresh_index(
     claude_home: Path, cwd: Path, data: Path, cfg: Config, force: bool = False
 ) -> SkillIndex:
     """The single index, with the global and this project's segments rebuilt when their fingerprints changed."""
-    index = SkillIndex(Path(data) / "index" / "skills.sqlite")
+    index = SkillIndex(index_path(data))
     vault_dir = _vault_dir(cfg)
     fp = fingerprint(skill_files(claude_home) + vault.skill_files(vault_dir))
     if force or index.stored_fingerprint(GLOBAL) != fp:
@@ -80,9 +85,23 @@ class _View:
         return self.index.visible(self.allow, self.project)
 
 
+def _with_view(claude_home: Path, cwd: Path, data: Path, cfg: Config, op: Callable[[_View], T],
+               force: bool = False) -> T:
+    """Run op on a fresh view. The index is a rebuildable cache: if SQLite reports it corrupt (when
+    opening it or in the middle of a query), its files are deleted and op runs once more on a full
+    rebuild. Any other error, or corruption that survives the rebuild, propagates."""
+    try:
+        return op(_View(claude_home, cwd, data, cfg, force))
+    except sqlite3.DatabaseError as exc:
+        if not is_corruption(exc):
+            raise
+    SkillIndex(index_path(data)).reset()
+    return op(_View(claude_home, cwd, data, cfg, force=True))
+
+
 def allowed_skills(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> list[Skill]:
     """Every usable skill: enabled plugins only, and a project skill replaces a global one with the same invoke."""
-    return _View(claude_home, cwd, data, cfg).skills()
+    return _with_view(claude_home, cwd, data, cfg, lambda view: view.skills())
 
 
 def known_invokes(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> set[str]:
@@ -104,11 +123,15 @@ def search(
     """Search candidates; `limit` defaults to candidate_limit(queries)."""
     if limit is None:
         limit = candidate_limit(queries)
-    view = _View(claude_home, cwd, data, cfg)
-    return view.index.search(queries, limit, view.allow, view.project)
+    return _with_view(
+        claude_home, cwd, data, cfg, lambda view: view.index.search(queries, limit, view.allow, view.project)
+    )
 
 
 def index_counts(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> tuple[int, int, int]:
     """Force a rebuild; return (global skills, project skills, searchable skills for this cwd)."""
-    view = _View(claude_home, cwd, data, cfg, force=True)
-    return view.index.count(GLOBAL), view.index.count(view.project), len(view.skills())
+    return _with_view(
+        claude_home, cwd, data, cfg,
+        lambda view: (view.index.count(GLOBAL), view.index.count(view.project), len(view.skills())),
+        force=True,
+    )

@@ -118,10 +118,24 @@ def _read_quoted(s: str, i: int):
                     j += 2
                 continue
             if ch == '"':
-                return "".join(out), j + 1
+                return _join_surrogate_pairs("".join(out)), j + 1
         out.append(ch)
         j += 1
     return None
+
+
+def _join_surrogate_pairs(text: str) -> str:
+    """Combine escaped UTF-16 surrogate pairs ("\\uD83D\\uDE00") into one character; lone ones stay."""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
+def is_utf8_text(text: str) -> bool:
+    """False for text that cannot be written as UTF-8 (lone surrogates, undecodable file names)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _inline_list(s: str) -> list[str]:

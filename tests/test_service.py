@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from conftest import make_skill
 from skillpick import service
 from skillpick.index import SkillIndex
@@ -215,3 +216,94 @@ def test_shadowing_consistent_and_disabled_project_plugin_does_not_shadow(env):
     [hit] = service.search(env.claude_home, env.cwd, env.data, cfg, ["common"])
     assert hit.skill.source == "user"  # the disabled project-scope plugin skill must not shadow it
     assert [s.source for s in service.allowed_skills(env.claude_home, env.cwd, env.data, cfg)] == ["user"]
+
+
+def test_skills_with_text_sqlite_cannot_store_never_break_search(env):
+    root = env.claude_home / "skills"
+    make_skill(root, "good-one", "description: wizard magic spells")
+    make_skill(root, "lone-desc", 'description: "wizard magic \\uD800"')
+    os.mkdir(os.fsencode(root) + b"/wizard\xff")
+    (root / os.fsdecode(b"wizard\xff") / "SKILL.md").write_text("---\ndescription: wizard magic\n---\n")
+    vault = env.claude_home.parent / "vault"
+    make_skill(vault, "good-one", 'tags: ["tool/ok", "tool/x\\uDC00"]\ndescription: d')
+    cfg = cfg_for(env)
+    [hit] = service.search(env.claude_home, env.cwd, env.data, cfg, ["wizard magic"])
+    assert hit.skill.invoke == "good-one" and hit.skill.tags == ("tool/ok",)
+    assert service.known_invokes(env.claude_home, env.cwd, env.data, cfg) == {"good-one"}
+
+
+def test_project_dir_whose_name_is_not_utf8_still_searches(env):
+    make_skill(env.claude_home / "skills", "good-one", "description: wizard magic spells")
+    os.mkdir(os.fsencode(env.cwd) + b"/proj\xfe")
+    odd = env.cwd / os.fsdecode(b"proj\xfe")
+    cfg = cfg_for(env)
+    for _ in range(2):  # the second run reads back the segment's recorded path
+        assert invokes(service.search(env.claude_home, odd, env.data, cfg, ["wizard magic"])) == ["good-one"]
+    assert service.known_invokes(env.claude_home, env.cwd, env.data, cfg) == {"good-one"}
+
+
+def _corrupt(db: Path) -> None:
+    db.write_bytes(os.urandom(8192))
+    for suffix in ("-wal", "-shm"):
+        db.with_name(db.name + suffix).write_bytes(os.urandom(512))
+
+
+def test_corrupt_index_file_is_deleted_and_rebuilt(env):
+    make_skill(env.claude_home / "skills", "alpha", "description: wizard magic spells")
+    cfg = cfg_for(env)
+    db = service.fresh_index(env.claude_home, env.cwd, env.data, cfg).db_path
+    _corrupt(db)
+    assert invokes(service.search(env.claude_home, env.cwd, env.data, cfg, ["wizard magic"])) == ["alpha"]
+    _corrupt(db)
+    assert service.known_invokes(env.claude_home, env.cwd, env.data, cfg) == {"alpha"}
+    _corrupt(db)
+    assert service.index_counts(env.claude_home, env.cwd, env.data, cfg) == (1, 0, 1)
+
+
+def test_corruption_found_mid_query_rebuilds_once(env, monkeypatch):
+    import sqlite3
+    make_skill(env.claude_home / "skills", "alpha", "description: wizard magic spells")
+    cfg = cfg_for(env)
+    calls = []
+    original = SkillIndex.search
+
+    def flaky(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SkillIndex, "search", flaky)
+    assert invokes(service.search(env.claude_home, env.cwd, env.data, cfg, ["wizard"])) == ["alpha"]
+    assert len(calls) == 2
+
+
+def test_persistent_corruption_is_raised_after_one_rebuild(env, monkeypatch):
+    import sqlite3
+    make_skill(env.claude_home / "skills", "alpha", "description: wizard magic spells")
+    calls = []
+
+    def broken(self, *args, **kwargs):
+        calls.append(1)
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(SkillIndex, "search", broken)
+    with pytest.raises(sqlite3.DatabaseError):
+        service.search(env.claude_home, env.cwd, env.data, cfg_for(env), ["wizard"])
+    assert len(calls) == 2
+
+
+def test_locked_index_is_never_deleted(env, monkeypatch):
+    import sqlite3
+    make_skill(env.claude_home / "skills", "alpha", "description: wizard magic spells")
+    cfg = cfg_for(env)
+    db = service.fresh_index(env.claude_home, env.cwd, env.data, cfg).db_path
+    before = db.read_bytes()
+
+    def locked(self, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SkillIndex, "search", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        service.search(env.claude_home, env.cwd, env.data, cfg, ["wizard"])
+    assert db.read_bytes() == before

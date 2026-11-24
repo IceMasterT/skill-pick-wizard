@@ -1,7 +1,7 @@
 """Tool-area tags from an optional Obsidian vault of skill copies, keyed by skill directory name."""
 from pathlib import Path
 
-from .frontmatter import parse_frontmatter, tag_list
+from .frontmatter import is_utf8_text, parse_frontmatter, tag_list
 
 _PREFIX = "tool/"
 
@@ -21,7 +21,7 @@ def area_tags(vault_dir: Path | None) -> dict[str, tuple[str, ...]]:
             fm = parse_frontmatter(md.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             continue
-        tags = tuple(t for t in tag_list(fm.get("tags")) if t.startswith(_PREFIX))
+        tags = tuple(t for t in tag_list(fm.get("tags")) if t.startswith(_PREFIX) and is_utf8_text(t))
         if tags:
             result[md.parent.name] = tags
     return result

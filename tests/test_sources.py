@@ -285,3 +285,46 @@ def test_sources_error_log_rotates(env):
     assert (env.data / "errors.log.1").exists()
     assert "no frontmatter" in (env.data / "errors.log").read_text(encoding="utf-8")
     assert (env.data / "errors.log").stat().st_size < 1024
+
+
+def _non_utf8_dir(root: Path, raw: bytes) -> Path:
+    """A directory whose name is not valid UTF-8 (Python sees it with surrogate escapes)."""
+    root.mkdir(parents=True, exist_ok=True)
+    os.mkdir(os.fsencode(root) + b"/" + raw)
+    return root / os.fsdecode(raw)
+
+
+def test_fields_that_are_not_utf8_text_are_rejected_and_logged(env):
+    root = env.claude_home / "skills"
+    make_skill(root, "good", "description: ok")
+    make_skill(root, "lone-desc", 'description: "bad \\uD800 text"')
+    make_skill(root, "lone-name", 'name: "n\\uDC00"\ndescription: fine')
+    make_skill(root, "lone-tag", 'description: fine\ntags: ["ok", "t\\uD83D"]')
+    bad_dir = _non_utf8_dir(root, b"bad\xff")
+    (bad_dir / "SKILL.md").write_text("---\ndescription: fine\n---\n", encoding="utf-8")
+    assert [s.invoke for s in sources.user_skills(env.claude_home)] == ["good"]
+    log = env.data / "errors.log"
+    lines = log.read_text(encoding="utf-8").splitlines()  # the log itself stays valid UTF-8
+    assert len(lines) == 4 and all("not valid UTF-8 text" in line for line in lines)
+    assert any("bad\\udcff" in line for line in lines)
+    sources.user_skills(env.claude_home)
+    assert log.read_text(encoding="utf-8").splitlines() == lines  # logged once, also for the odd path
+
+
+def test_plugin_id_that_is_not_utf8_text_is_rejected(env, tmp_path):
+    root = make_plugin(tmp_path, "sp", "1.0")
+    install(env, {"sp\udc80@m": [{"scope": "user", "installPath": str(root)}]})
+    assert sources.plugin_skills(env.claude_home) == []
+    assert "not valid UTF-8 text" in (env.data / "errors.log").read_text(encoding="utf-8")
+
+
+def test_skills_claude_may_not_invoke_are_left_out(env):
+    """Claude Code hides a skill from the Skill tool when disable-model-invocation is true, yes, on or 1."""
+    root = env.claude_home / "skills"
+    hidden = {"t1": "true", "t2": "True", "t3": "yes", "t4": '"on"', "t5": "1", "t6": " TRUE  # user only"}
+    shown = {"f1": "false", "f2": "no", "f3": "0", "f4": "maybe", "f5": "[true]"}
+    for name, value in {**hidden, **shown}.items():
+        make_skill(root, name, f"description: d\ndisable-model-invocation: {value}")
+    make_skill(root, "plain", "description: d")
+    assert [s.invoke for s in sources.user_skills(env.claude_home)] == sorted([*shown, "plain"])
+    assert not (env.data / "errors.log").exists()  # a deliberate setting, not an error

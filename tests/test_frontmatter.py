@@ -87,3 +87,13 @@ def test_plain_comment_rules():
 
 def test_multiline_inline_list():
     assert p("---\ntags: [a,\n  b, 'c, d']\nname: x\n---\n") == {"tags": ["a", "b", "c, d"], "name": "x"}
+
+
+def test_escaped_surrogate_pair_becomes_one_character():
+    fm = p('---\ndescription: "smile \\uD83D\\uDE00 now"\n---\n')
+    assert fm["description"] == "smile \U0001F600 now"
+
+
+def test_lone_escaped_surrogate_is_kept_for_the_caller_to_reject():
+    fm = p('---\ndescription: "bad \\uD800"\n---\n')
+    assert fm["description"] == "bad \ud800"

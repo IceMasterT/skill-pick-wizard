@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .frontmatter import parse_frontmatter, tag_list
+from .frontmatter import is_utf8_text, parse_frontmatter, tag_list
 from .paths import append_error_log, data_dir
 
 
@@ -24,9 +24,18 @@ class Skill:
 _ESCAPES = {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
 
 
+def _escape(ch: str) -> str:
+    if ch in _ESCAPES:
+        return _ESCAPES[ch]
+    if "\ud800" <= ch <= "\udfff":  # lone surrogate (e.g. an undecodable file name): not UTF-8
+        return f"\\u{ord(ch):04x}"
+    return ch
+
+
 def _encode(field: str) -> str:
-    """Escape backslash, tab, newline and CR so a field never breaks the tab/newline line format."""
-    return "".join(_ESCAPES.get(ch, ch) for ch in field)
+    """Escape backslash, tab, newline, CR and lone surrogates, so a field never breaks the
+    tab/newline line format and always writes as UTF-8."""
+    return "".join(_escape(ch) for ch in field)
 
 
 def _timestamp(value) -> float:
@@ -79,6 +88,15 @@ class _ErrorLog:
             pass  # logging must never break discovery
 
 
+# Claude Code's truthy forms for frontmatter flags: YAML true, or these strings/numbers (any case).
+_TRUE_FLAGS = {"1", "true", "yes", "on"}
+
+
+def model_invocation_disabled(value) -> bool:
+    """True when a `disable-model-invocation` value makes Claude Code refuse the skill in the Skill tool."""
+    return isinstance(value, str) and value.strip().lower() in _TRUE_FLAGS
+
+
 def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
                errors: _ErrorLog | None = None) -> Skill | None:
     errors = errors or _ErrorLog()
@@ -91,6 +109,8 @@ def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
     if not fm:
         errors.log(skill_md, "no frontmatter")
         return None
+    if model_invocation_disabled(fm.get("disable-model-invocation")):
+        return None  # Claude Code keeps it out of the Skill tool; only the user can run it
     description = fm.get("description")
     if description is not None and not isinstance(description, str):
         errors.log(skill_md, "description is not a string")
@@ -101,7 +121,7 @@ def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
     name = fm.get("name")
     if not isinstance(name, str) or not name.strip():
         name = skill_md.parent.name
-    return Skill(
+    skill = Skill(
         invoke=invoke,
         name=name.strip(),
         description=description.strip(),
@@ -110,6 +130,20 @@ def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
         path=os.path.abspath(skill_md),
         tags=tag_list(fm.get("tags")),
     )
+    bad = _non_utf8_field(skill)
+    if bad:
+        # The index (SQLite) and Claude only take real text; one such skill must not break the rest.
+        errors.log(skill_md, f"not valid UTF-8 text: {bad}")
+        return None
+    return skill
+
+
+def _non_utf8_field(skill: Skill) -> str | None:
+    """The name of the first field that is not UTF-8 text, or None."""
+    fields = [("invoke", skill.invoke), ("name", skill.name), ("description", skill.description),
+              ("plugin", skill.plugin_id or ""), ("path", skill.path)]
+    fields += [("tags", tag) for tag in skill.tags]
+    return next((label for label, value in fields if not is_utf8_text(value)), None)
 
 
 def _skill_mds(skills_root: Path, errors: _ErrorLog | None = None) -> list[Path]:

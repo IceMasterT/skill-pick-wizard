@@ -10,6 +10,7 @@ rank in any list, then by its reciprocal-rank-fusion score, so every query's bes
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import time
@@ -23,7 +24,7 @@ from .sources import Skill
 _WORD = re.compile(r"[^\W_]+")
 _RRF_K = 60
 # Bump when the table layout changes; a mismatch drops and recreates the (cache-only) index.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _COLUMNS = "invoke, name, description, source, plugin_id, path, tags_json"
 
 _SCHEMA = """
@@ -106,6 +107,20 @@ def required_matches(n_terms: int) -> int:
     return max(1, math.ceil(n_terms / 2))
 
 
+def index_path(data: Path) -> Path:
+    """Where the index lives inside the data directory."""
+    return Path(data) / "index" / "skills.sqlite"
+
+
+def is_corruption(exc: BaseException) -> bool:
+    """True for SQLite's "database disk image is malformed" and "file is not a database".
+
+    Python maps exactly those result codes (SQLITE_CORRUPT, SQLITE_NOTADB) to the base
+    sqlite3.DatabaseError; locks, I/O and constraint errors are subclasses and never count.
+    """
+    return type(exc) is sqlite3.DatabaseError
+
+
 def _fp_key(segment: str) -> str:
     return f"fingerprint:{segment}"
 
@@ -123,7 +138,8 @@ _TOUCH_INTERVAL = 3600.0
 
 
 def _write_usage(conn: sqlite3.Connection, segment: str, path: str, now: float) -> None:
-    conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_path_key(segment), path))
+    # Paths are stored as their file-system bytes, so a directory name that is not UTF-8 still fits.
+    conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_path_key(segment), os.fsencode(path)))
     conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_used_key(segment), repr(now)))
 
 
@@ -139,6 +155,11 @@ def _row_to_skill(row: tuple) -> Skill:
 class SkillIndex:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
+
+    def reset(self) -> None:
+        """Delete the database and its WAL, shared-memory and rollback-journal files."""
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            self.db_path.with_name(self.db_path.name + suffix).unlink(missing_ok=True)
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,7 +256,7 @@ class SkillIndex:
             ).fetchall())
             try:
                 fresh = (
-                    rows.get(_path_key(segment)) == path
+                    rows.get(_path_key(segment)) == os.fsencode(path)
                     and 0 <= now - float(rows[_used_key(segment)]) < _TOUCH_INTERVAL
                 )
             except (KeyError, ValueError):
@@ -270,7 +291,7 @@ class SkillIndex:
                 stale = used is None or float(used) < cutoff
             except ValueError:
                 stale = True
-            if stale or path is None or not path_exists(path):
+            if stale or not isinstance(path, bytes) or not path_exists(os.fsdecode(path)):
                 out.append(segment)
         return out
 

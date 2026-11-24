@@ -19,6 +19,8 @@ Follow the steps in order. Work through steps 0 to 6 without commentary: the use
 4. Run `<pick> status`. Note `mode`, `deep_scan` and `deep_scan_model`.
 5. The mode for this job is the mode the invoking command gave (`/autopick` means `silent`). Otherwise it is `mode` from `status`. A command's mode applies to this job only; never change the saved mode.
 
+If `status` or `search` fails (it prints an error line instead of its normal output), say in one line: `Skill scan failed (<error>).` Then run `<pick> skip`, so the hook does not start a new scan on every message, and do the job without a plan. The rest of this flow does not apply.
+
 **Quoting.** Put every free-text argument (each query, the job summary, the plan JSON) in single quotes. Keep that text free of single quotes, backticks, `$` and backslashes by rewording it. If a value cannot avoid a single quote (for example a skill name), write that quote as `'\''`.
 
 ## 1. Stages

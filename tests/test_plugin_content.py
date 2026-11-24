@@ -387,3 +387,11 @@ def test_query_guidance_caps_queries_and_asks_for_descriptive_wording():
     search = _section(_read(SKILL), "## 2. Search", "## 3.")
     assert "broader words" not in search  # the retry must not fall back to bare category words
     assert "planning`, `testing`" not in search
+
+
+def test_failed_status_or_search_skips_and_does_the_job():
+    text = _read(SKILL)
+    rule = re.search(r"If `status` or `search` fails.*?\n\n", text, re.S)
+    assert rule, "SKILL.md must say what to do when status or search fails"
+    assert "`Skill scan failed (<error>).`" in rule.group(0)
+    assert "`<pick> skip`" in rule.group(0) and "do the job without a plan" in rule.group(0)

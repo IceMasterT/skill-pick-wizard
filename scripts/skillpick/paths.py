@@ -19,8 +19,8 @@ def data_dir() -> Path:
 
 
 def project_key(cwd: Path) -> str:
-    resolved = str(Path(cwd).resolve())
-    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+    """Short hash of the resolved project path's bytes (any file name, UTF-8 or not)."""
+    return hashlib.sha256(os.fsencode(Path(cwd).resolve())).hexdigest()[:16]
 
 
 ERROR_LOG_MAX_BYTES = 1024 * 1024
