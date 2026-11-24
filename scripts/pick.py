@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from skillpick import service  # noqa: E402
+from skillpick import catalog, service  # noqa: E402
 from skillpick.paths import claude_home, data_dir  # noqa: E402
 from skillpick.state import (  # noqa: E402
     MODES,
@@ -186,6 +186,16 @@ def cmd_index(args) -> None:
     print(f"searchable: {searchable}")
 
 
+def cmd_catalog(args) -> None:
+    sid = _session_id(args)
+    cwd = _cwd(args)
+    data = data_dir()
+    skills = service.allowed_skills(claude_home(), cwd, data, load_config(data))
+    paths = catalog.write_catalog(skills, data / "catalog" / sid, args.chunks)
+    for path in paths:
+        print(path.resolve())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="pick.py", description="skill-pick-wizard CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -216,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("deep-scan", cmd_deep_scan)
     p.add_argument("value", nargs="?", choices=("on", "off"))
     add("index", cmd_index, cwd=True)
+    p = add("catalog", cmd_catalog, session=True, cwd=True)
+    p.add_argument("--chunks", type=_positive_int, default=3)
     return parser
 
 

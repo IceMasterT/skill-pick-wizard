@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -42,8 +43,8 @@ class SessionState:
     updated: float = 0.0
 
 
-def atomic_write_json(path: Path, obj) -> None:
-    """Write obj as JSON so a reader sees either the old file or the new one, never a partial."""
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text so a reader sees either the old file or the new one, never a partial."""
     path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile(
@@ -51,7 +52,7 @@ def atomic_write_json(path: Path, obj) -> None:
     )
     try:
         with tmp:
-            json.dump(obj, tmp, ensure_ascii=False)
+            tmp.write(text)
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp.name, path)
@@ -62,6 +63,11 @@ def atomic_write_json(path: Path, obj) -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write_json(path: Path, obj) -> None:
+    """Atomically write obj as JSON (see atomic_write_text)."""
+    atomic_write_text(path, json.dumps(obj, ensure_ascii=False))
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -193,10 +199,10 @@ def clear_session(data: Path, sid: str) -> None:
 
 
 def cleanup_sessions(data: Path, max_age_days: int = 14, now: float | None = None) -> int:
-    """Remove stale session files and orphaned temp files; returns how many were removed.
+    """Remove stale session files, catalog/<sid>/ directories and orphaned temp files; returns how many were removed.
 
     Session files (<valid sid>.json in sessions/) and *.tmp files (left behind by a
-    killed writer, in sessions/ and the data dir) older than max_age_days are removed.
+    killed writer, in sessions/ and the data dir) and catalog/<valid sid>/ directories older than max_age_days are removed.
     Only files whose mtime is past the cutoff are touched, so a live writer's fresh
     temp file or session is never removed. A save landing between the stat and the
     unlink of an already stale file would be lost; that race is accepted because the
@@ -211,6 +217,18 @@ def cleanup_sessions(data: Path, max_age_days: int = 14, now: float | None = Non
     candidates += (data / "sessions").glob("*.tmp")
     candidates += data.glob("*.tmp")
     removed = 0
+    for d in (data / "catalog").glob("*"):
+        try:
+            if (
+                valid_session_id(d.name)
+                and d.is_dir()
+                and not d.is_symlink()
+                and d.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(d)
+                removed += 1
+        except OSError:
+            continue
     for f in candidates:
         try:
             if f.stat().st_mtime >= cutoff:
