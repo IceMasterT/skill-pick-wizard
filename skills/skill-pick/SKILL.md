@@ -7,7 +7,7 @@ description: Use when the Skill Pick Wizard hook says a skill scan is pending, o
 
 Most installed skills are visible to you only by name. This flow finds the ones that fit the job by their full descriptions, gets them approved when the mode asks for it, and makes sure you actually use them for the whole job.
 
-Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list and the questions. Do none of the job's own work before step 7.
+Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list, the questions and the one-line notices named below. Do none of the job's own work before step 7.
 
 ## 0. Command
 
@@ -35,6 +35,7 @@ Follow the steps in order. Work through steps 0 to 6 without commentary: the use
    <pick> search --cwd '<cwd>' -- '<query 1>' '<query 2>' '<query 3>'
    ```
 
+   When `status` printed `deep_scan: on`, send this command and the step 3 `catalog` command as two Bash calls in the same message; both need only the stages.
 2. It prints about 30 candidates. Each is a line `` `<invoke>`  [<tags>]  (matched: <queries>) `` followed by the skill's full description. The first run can take a few seconds while the index builds.
 3. If it prints `no matches`, or only skills unrelated to the job, rewrite the queries once with broader words (for example `planning`, `testing`, `debugging`, `code review`) and search again.
 
@@ -42,7 +43,13 @@ Follow the steps in order. Work through steps 0 to 6 without commentary: the use
 
 Skip this step when `status` printed `deep_scan: off`.
 
-1. Run `<pick> catalog --cwd '<cwd>'`. It prints one chunk file path per line.
+1. The catalog command, sent together with the search (step 2):
+
+   ```
+   <pick> catalog --cwd '<cwd>'
+   ```
+
+   It prints one chunk file path per line.
 2. In ONE message, make one Agent call per printed path, so all of them run in parallel:
    - `subagent_type`: `skill-pick-wizard:skill-deep-scanner`
    - `model`: the `deep_scan_model` value from `status`
@@ -58,18 +65,19 @@ Skip this step when `status` printed `deep_scan: off`.
      ```
 
 3. If the Agent tool rejects the `model` value, make the same calls again in one message without `model`.
-4. Each agent answers with lines `` <stage> | `<invoke>` | <reason> `` or `<stage> | NONE`. Add each invoke from those lines to the candidates of that stage. Ignore `NONE` lines and lines in any other form.
-5. If an agent failed or returned no line in either form, say in one line: `Deep scan was partial (<n> of <total> chunks).`
-6. If `catalog` failed, say in one line that the deep scan could not run, and continue with the search candidates as if deep scan were off.
+4. Each agent answers with lines `` <stage> | `<invoke>` | <reason> `` or `<stage> | NONE`. Add each invoke from those lines to the candidates of that stage, together with its reason line. Ignore `NONE` lines and lines in any other form.
+5. An agent failed if it returned an error or no line in either form. If some agents failed, say in one line: `Deep scan was partial (<n> of <total> chunks).`
+6. If every agent failed, or `catalog` failed, say in one line that the deep scan could not run, and continue with the search candidates as if deep scan were off: no `(deep scan)` in the header and no `--deep-scan` when saving.
 
 ## 4. Choose
 
 1. Pick 3 to 8 skills in total, grouped by stage, at most 4 per stage. Use only invokes that appeared in the candidates, copied exactly.
-2. Choose by full description: a skill goes in a stage only if its description says it does the work of that stage. Prefer a skill made for the job's stack or domain over a generic one. Never pick two skills that do the same thing. General workflow skills (planning, test-driven development, debugging, verification, code review) count when the job includes that work.
-3. Give every stage at least one skill. Drop a stage that no candidate fits.
-4. Every unpicked candidate is an alternative. For each stage, keep the next 3 best-fitting unpicked candidates as its swap alternatives.
-5. Write the job summary: the job in at most 10 words, in the user's terms.
-6. If no candidate fits the job at all, say so in one line, run `<pick> skip`, and do the job without a plan. Steps 5 to 7 do not apply.
+2. Choose by what each skill does: a skill goes in a stage only if it does the work of that stage. For search candidates, judge by the full description. For candidates that only the deep scan found, judge by the agent's reason line, since their full description is not in front of you.
+3. Prefer a skill made for the job's stack or domain over a generic one. Never pick two skills that do the same thing. General workflow skills (planning, test-driven development, debugging, verification, code review) count when the job includes that work.
+4. Give every stage at least one skill. Drop a stage that no candidate fits.
+5. Every unpicked candidate is an alternative. For each stage, keep the next 3 best-fitting unpicked candidates as its swap alternatives.
+6. Write the job summary: the job in at most 10 words, in the user's terms.
+7. If no candidate fits the job at all, say so in one line, run `<pick> skip`, and do the job without a plan. Steps 5 to 7 do not apply.
 
 ## 5. Act by mode
 
@@ -81,42 +89,11 @@ Skills for: "<job summary>"
   Building   test-driven-development, frontend-ui-engineering
 ```
 
-Append ` (deep scan)` to the header line when step 3 ran: `Skills for: "<job summary>" (deep scan)`.
+Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<job summary>" (deep scan)`.
 
 - **silent:** show nothing except the one-line notices from steps 3 and 6. Go to step 6.
 - **show:** show the list, then go straight to step 6 without asking.
-- **approve:** show the list, then call `AskUserQuestion` with one question:
-  - question `Use these skills for this job?`, header `Skills`, single select;
-  - exactly these four options, in this order:
-
-    | label | description |
-    |---|---|
-    | `Approve and start` | Save this plan and start the job |
-    | `Swap one` | Replace one skill with an alternative |
-    | `Add one` | Add a skill by name or by need |
-    | `Skip for this session` | Do the job without a skill plan |
-
-Handle the answer:
-
-- **Approve and start:** go to step 6.
-- **Skip for this session:** run `<pick> skip`, say in one line that skill picking is skipped for this session, then do the job without a plan. Steps 6 and 7 do not apply.
-- **Swap one:**
-  1. Ask `Which skill should be replaced?`. With 4 or fewer picks, the options are the picks (label: the invoke, description: its stage). With more than 4, the options are the stages (label: the stage, description: its skills); then, unless the chosen stage has a single skill, ask again with that stage's skills as options (its first 4 if it has more; the user types any other in "Other").
-  2. Ask `Replace <invoke> with?`. The options are up to 3 of that stage's alternatives (label: the invoke, description: a short version of its description), then `Remove it` last. If the stage has no alternatives left, the options are `Remove it` and `Keep it`.
-  3. Text typed in "Other" at the first question names the skill to replace: match it to a skill in the list. If none matches, say so in one line and ask the four-option question again. Text typed in "Other" at the second question: see **Typed text** below.
-  4. A chosen alternative takes the replaced skill's place. `Remove it` drops the skill (and its stage, if that leaves the stage empty). `Keep it` changes nothing. The replaced or removed skill becomes an alternative again.
-- **Add one:** ask `Which skill should be added?`. The options are the 3 best-fitting alternatives across all stages (label: the invoke, description: its stage and a short version of its description), then `Cancel` last. The user can type a skill name or a need in "Other" (see **Typed text**). Add the chosen skill to the stage it fits best. `Cancel` changes nothing. If no alternatives are left, skip this question: say in one line that the user can type a skill name or need in "Other", and ask the four-option question again.
-- **Text typed in "Other" on this question:** if it approves (for example "yes", "go", "looks good"), treat it as `Approve and start`. If it asks for changes (for example "drop X", "use Y instead of X"), apply them, resolving any skill it names as in **Typed text**. Otherwise answer it in one line, then ask the four-option question again.
-
-After every swap, add or change, show the updated list and ask the same four-option question again. Only `Approve and start` or `Skip for this session` ends the loop. Every round waits for the user's answer; never answer for them.
-
-If `AskUserQuestion` is not available or returns an error, continue as in show mode and save with `--mode show`.
-
-**Typed text** (a skill name or a need the user typed):
-
-1. If it equals an invoke among the candidates, use that skill.
-2. Otherwise run `<pick> search --cwd '<cwd>' -- '<their text>'`. Ask `Did you mean?` with its top 3 results as options (label: the invoke, description: a short version of its description) and `None of these` last. Text typed in "Other" here is resolved again the same way.
-3. If the search prints `no matches`, say so in one line. On `None of these` or no matches, change nothing and ask the four-option question again.
+- **approve:** show the list, then Read `<base directory>/approve.md` with the Read tool and follow it. It ends either at step 6 with the approved list, or with the job started without a plan.
 
 ## 6. Save
 
@@ -133,10 +110,10 @@ If `AskUserQuestion` is not available or returns an error, continue as in show m
    <pick> save-plan --cwd '<cwd>' --job '<job summary>' --plan '<plan JSON>' --mode <mode used>
    ```
 
-   `<mode used>` is `approve`, `show` or `silent`. Add `--deep-scan` when step 3 ran.
+   `<mode used>` is `approve`, `show` or `silent`. Add `--deep-scan` when the deep scan ran.
 4. It prints `saved plan: <n> stages` on success.
 5. If it prints `unknown skills: <list>`, replace each listed skill with an alternative of the same stage that came from the search output (those are always known), or drop it, and run `save-plan` again. Tell the user in one line only if the approved list changed.
-6. On any other error, say in one line that the plan could not be saved and why, then still do step 7 with the final list.
+6. On any other error, run `<pick> skip` so the hook does not start this flow again on every message, say in one line that the plan could not be saved and why, and still do step 7 with the final list.
 
 ## 7. Start the job
 

@@ -1,6 +1,7 @@
 """Static checks on the plugin's markdown: the skill, the slash commands and the agent."""
 import json
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -11,25 +12,32 @@ from skillpick.hookctx import PLUGIN_COMMANDS, build_context
 from skillpick.state import Config
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL = REPO / "skills" / "skill-pick" / "SKILL.md"
+SKILL_DIR = REPO / "skills" / "skill-pick"
+SKILL = SKILL_DIR / "SKILL.md"
+APPROVE = SKILL_DIR / "approve.md"
 AGENT = REPO / "agents" / "skill-deep-scanner.md"
 COMMANDS = REPO / "commands"
 APPROVAL_OPTIONS = ("Approve and start", "Swap one", "Add one", "Skip for this session")
 PICK_CMD = 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pick.py"'
+MAX_HEADER = 12  # AskUserQuestion's header limit
+MAX_OPTIONS = 4  # AskUserQuestion allows 2 to 4 options plus its automatic "Other"
 
 # `pick.py <sub>` (optionally after a closing quote) and the skill's `<pick> <sub>` placeholder form.
 _SUBCOMMAND_RE = re.compile(r"""(?:pick\.py["']?|<pick>)[ \t]+([A-Za-z][\w-]*)""")
-
-
-def _markdown_files() -> list[Path]:
-    files = []
-    for folder in ("skills", "commands", "agents"):
-        files += sorted((REPO / folder).rglob("*.md"))
-    return files
+# The start of a runnable command line: the skill's placeholder or the commands' full CLI path.
+_COMMAND_START_RE = re.compile(r"""^(?:<pick>|python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/pick\.py")[ \t]+""")
+_QUESTION_RE = re.compile(r"^\*\*Ask\*\* `([^`]+)` \(header `([^`]+)`\)")
+_FIXED_OPTION_RE = re.compile(r"^- `([^`]+)`: \S")
+_DYNAMIC_OPTION_RE = re.compile(r"^- Up to (\d+) \S")
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _flow_files() -> list[Path]:
+    """Every markdown file whose text Claude follows to run pick.py: the skill folder and the commands."""
+    return sorted(SKILL_DIR.rglob("*.md")) + sorted(COMMANDS.glob("*.md"))
 
 
 def _subcommands() -> set[str]:
@@ -42,16 +50,70 @@ def _plugin_name() -> str:
     return json.loads(_read(REPO / ".claude-plugin" / "plugin.json"))["name"]
 
 
+def _command_lines(text: str) -> list[str]:
+    """pick.py command lines (without the program part) from code spans and fenced code blocks."""
+    found = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        spans = [line.strip()] if in_fence else re.findall(r"`([^`]*)`", line)
+        for span in spans:
+            match = _COMMAND_START_RE.match(span)
+            if match:
+                found.append(span[match.end():])
+    return found
+
+
+def _fill(command: str, arguments: str = "") -> list[str]:
+    """Replace placeholders with dummy values and split like a POSIX shell would."""
+    command = command.replace("<mode used>", "approve").replace("$ARGUMENTS", arguments)
+    return shlex.split(re.sub(r"<[^<>]+>", "x", command))
+
+
+def _parse(argv: list[str]):
+    try:
+        return pick.build_parser().parse_args(argv)
+    except SystemExit:
+        pytest.fail(f"pick.py rejects: {argv}")
+
+
+def _session_subcommands() -> set[str]:
+    match = re.search(r"add `--session <that id>` to every (.+?) command", _read(SKILL))
+    assert match, "SKILL.md must say which commands get --session"
+    return set(re.findall(r"`([^`]+)`", match.group(1)))
+
+
+def _questions(text: str) -> list[tuple[str, str, list[str]]]:
+    """(question, header, option lines) for each `**Ask** ...` block; options are the `- ` lines below it."""
+    lines = [line.strip() for line in text.splitlines()]  # questions may sit inside numbered steps
+    out = []
+    for i, line in enumerate(lines):
+        match = _QUESTION_RE.match(line)
+        if not match:
+            continue
+        options = []
+        for follow in lines[i + 1:]:
+            if not follow.startswith("- "):
+                break
+            options.append(follow)
+        out.append((match.group(1), match.group(2), options))
+    return out
+
+
 def test_expected_files_exist():
     assert SKILL.is_file()
+    assert APPROVE.is_file()
     assert AGENT.is_file()
     for name in ("skill-mode", "skill-deep-scan", "autopick", "skill-pick"):
         assert (COMMANDS / f"{name}.md").is_file(), name
 
 
 def test_all_markdown_frontmatter_parses():
-    files = _markdown_files()
-    assert files
+    files = sorted((REPO / "skills").rglob("SKILL.md"))
+    files += sorted(COMMANDS.glob("*.md")) + sorted((REPO / "agents").glob("*.md"))
+    assert len(files) >= 6
     for path in files:
         fm = parse_frontmatter(_read(path))
         desc = fm.get("description")
@@ -62,6 +124,16 @@ def test_all_markdown_frontmatter_parses():
         if folder == "commands":
             hint = fm.get("argument-hint")
             assert isinstance(hint, str) and hint.strip(), path
+
+
+def test_skill_support_files_are_referenced_and_have_no_frontmatter():
+    """Files beside SKILL.md are read on demand, so SKILL.md must name them and they are not skills."""
+    skill_text = _read(SKILL)
+    support = [p for p in SKILL_DIR.rglob("*.md") if p != SKILL]
+    assert support
+    for path in support:
+        assert f"<base directory>/{path.relative_to(SKILL_DIR).as_posix()}" in skill_text, path
+        assert parse_frontmatter(_read(path)) == {}, path
 
 
 def test_skill_name_matches_its_directory():
@@ -79,16 +151,65 @@ def test_skill_description_states_its_triggers():
 def test_commands_reference_real_subcommands():
     known = _subcommands()
     found = 0
-    for path in sorted(COMMANDS.glob("*.md")) + [SKILL]:
+    for path in _flow_files():
         for word in _SUBCOMMAND_RE.findall(_read(path)):
             assert word in known, f"{path.name}: pick.py {word}"
             found += 1
     assert found
 
 
+def test_every_command_mention_is_a_parseable_code_line():
+    """Each `<pick> <sub>` / `pick.py <sub>` mention sits in a code span or block the parser test covers."""
+    for path in _flow_files():
+        text = _read(path)
+        assert len(_command_lines(text)) == len(_SUBCOMMAND_RE.findall(text)), path.name
+
+
+def test_every_command_line_parses_with_the_real_parser():
+    session_subs = _session_subcommands()
+    checked = 0
+    for path in _flow_files():
+        fm = parse_frontmatter(_read(path))
+        hint = fm.get("argument-hint", "") if path.parent == COMMANDS else ""
+        for command in _command_lines(_read(path)):
+            if "$ARGUMENTS" in command:
+                values = [""] + re.findall(r"\w[\w-]*", hint)
+            else:
+                values = [""]
+            for value in values:
+                argv = _fill(command, value)
+                args = _parse(argv)
+                checked += 1
+                if path.parent == SKILL_DIR and args.command in session_subs:
+                    assert _parse(argv + ["--session", "s1"]).session == "s1", command
+                if args.command == "save-plan":
+                    assert _parse(argv + ["--deep-scan"]).deep_scan is True
+                if args.command == "search":
+                    assert args.queries and all(q == "x" for q in args.queries), command
+    assert checked >= 10
+
+
 def test_skill_uses_every_flow_subcommand():
-    used = set(_SUBCOMMAND_RE.findall(_read(SKILL)))
+    used = set()
+    for path in SKILL_DIR.rglob("*.md"):
+        used |= {_fill(c)[0] for c in _command_lines(_read(path))}
     assert {"status", "search", "catalog", "save-plan", "skip"} <= used
+
+
+def test_session_rule_names_commands_the_skill_runs_that_accept_session():
+    session_subs = _session_subcommands()
+    assert session_subs == {"status", "catalog", "save-plan", "skip"}
+    for sub in session_subs:
+        extra = ["--job", "j", "--plan", "[]"] if sub == "save-plan" else []
+        assert _parse([sub, "--session", "s1"] + extra).session == "s1"
+
+
+def test_skill_plan_json_example_is_accepted_by_save_plan():
+    blocks = re.findall(r"```\n\s*(\[\{.*?\}\])\n\s*```", _read(SKILL), re.S)
+    assert blocks
+    for block in blocks:
+        stages = pick._parse_plan(block)
+        assert stages and all(st.skills for st in stages)
 
 
 @pytest.mark.parametrize(
@@ -117,10 +238,48 @@ def test_command_files_match_hook_command_list():
 
 
 def test_skill_lists_exact_approval_options():
+    questions = _questions(_read(APPROVE))
+    main = [q for q in questions if q[0] == "Use these skills for this job?"]
+    assert len(main) == 1
+    labels = [_FIXED_OPTION_RE.match(o).group(1) for o in main[0][2]]
+    assert labels == list(APPROVAL_OPTIONS)
+
+
+def test_every_question_fits_ask_user_question_limits():
+    questions = _questions(_read(APPROVE))
+    assert len(questions) >= 6
+    for question, header, options in questions:
+        assert 0 < len(header) <= MAX_HEADER, question
+        assert options, question
+        most = 0
+        for option in options:
+            fixed, dynamic = _FIXED_OPTION_RE.match(option), _DYNAMIC_OPTION_RE.match(option)
+            assert fixed or dynamic, f"{question}: unparseable option line {option!r}"
+            most += int(dynamic.group(1)) if dynamic else 1
+        assert most <= MAX_OPTIONS, question
+    # Dynamic option lists can shrink below 2, so the file must say what happens then.
+    assert "fewer than 2 options" in _read(APPROVE)
+
+
+def test_approve_mode_is_read_only_in_approve_mode():
+    skill_text = _read(SKILL)
+    assert "AskUserQuestion" not in skill_text
+    assert "AskUserQuestion" in _read(APPROVE)
+    assert re.search(r"\*\*approve:\*\*.*Read `<base directory>/approve\.md`", skill_text)
+
+
+def test_approve_flow_handles_declined_and_unavailable_question_differently():
+    text = _read(APPROVE)
+    assert "declines or dismisses" in text
+    assert "not available" in text
+
+
+def test_skill_pins_deep_scan_and_save_fallbacks():
     text = _read(SKILL)
-    assert "AskUserQuestion" in text
-    for label in APPROVAL_OPTIONS:
-        assert label in text, label
+    assert "If every agent failed" in text
+    assert "reason line" in text
+    assert "same message" in text
+    assert re.search(r"any other error.*<pick> skip", text, re.I | re.S)
 
 
 def test_skill_shows_the_spec_list_header():
