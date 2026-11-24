@@ -79,6 +79,18 @@ def _fp_key(segment: str) -> str:
     return f"fingerprint:{segment}"
 
 
+def _path_key(segment: str) -> str:
+    return f"path:{segment}"
+
+
+def _used_key(segment: str) -> str:
+    return f"used:{segment}"
+
+
+# Rewriting last-used on every search would turn reads into writes; once an hour is plenty for a 30-day expiry.
+_TOUCH_INTERVAL = 3600.0
+
+
 def _invoke_text(invoke: str) -> str:
     return re.sub(r"[-:_]+", " ", invoke)
 
@@ -170,6 +182,79 @@ class SkillIndex:
                 except sqlite3.Error:
                     pass  # never mask the original exception
                 raise
+
+    def touch_segment(self, segment: str, path: str, now: float) -> None:
+        """Record the segment's project path and last-used time (a write only when stale or changed)."""
+        with closing(self._connect()) as conn:
+            rows = dict(conn.execute(
+                "SELECT k, v FROM meta WHERE k IN (?, ?)", (_path_key(segment), _used_key(segment))
+            ).fetchall())
+            try:
+                fresh = (
+                    rows.get(_path_key(segment)) == path
+                    and 0 <= now - float(rows[_used_key(segment)]) < _TOUCH_INTERVAL
+                )
+            except (KeyError, ValueError):
+                fresh = False
+            if fresh:
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_path_key(segment), path))
+                conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_used_key(segment), repr(now)))
+                conn.execute("COMMIT")
+            except BaseException:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def prune_segments(
+        self, keep: str, now: float, max_age_days: float, path_exists: Callable[[str], bool]
+    ) -> list[str]:
+        """Drop project segments whose recorded path is gone or that were unused for max_age_days.
+
+        One transaction. The "global" segment and `keep` are never dropped; segments without
+        usage metadata are left alone. Returns the dropped segment names.
+        """
+        cutoff = now - max_age_days * 86400
+        dropped: list[str] = []
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                meta = dict(conn.execute("SELECT k, v FROM meta").fetchall())
+                for key, used in meta.items():
+                    if not key.startswith("used:project:"):
+                        continue
+                    segment = key[len("used:"):]
+                    if segment == keep:
+                        continue
+                    try:
+                        stale = float(used) < cutoff
+                    except ValueError:
+                        stale = True
+                    path = meta.get(_path_key(segment))
+                    if not (stale or path is None or not path_exists(path)):
+                        continue
+                    conn.execute(
+                        "DELETE FROM fts WHERE rowid IN (SELECT rowid FROM skills WHERE segment = ?)",
+                        (segment,),
+                    )
+                    conn.execute("DELETE FROM skills WHERE segment = ?", (segment,))
+                    conn.execute(
+                        "DELETE FROM meta WHERE k IN (?, ?, ?)",
+                        (_fp_key(segment), _path_key(segment), _used_key(segment)),
+                    )
+                    dropped.append(segment)
+                conn.execute("COMMIT")
+            except BaseException:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        return dropped
 
     def count(self, segment: str | None = None) -> int:
         return len(self.all(segment))

@@ -1,4 +1,5 @@
 """Glue between discovery, the SQLite indexes and the CLI: fresh indexes, search, allowed skills."""
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def _with_vault_tags(skills: list[Skill], tags: dict[str, tuple[str, ...]]) -> l
 
 
 GLOBAL = "global"
+PROJECT_MAX_AGE_DAYS = 30
 
 
 def project_segment(cwd: Path) -> str:
@@ -49,6 +51,8 @@ def fresh_index(
         index.replace_segment(GLOBAL, _with_vault_tags(skills, vault.area_tags(vault_dir)), fp)
 
     segment = project_segment(cwd)
+    index.touch_segment(segment, str(Path(cwd).resolve()), time.time())
+    index.prune_segments(segment, time.time(), PROJECT_MAX_AGE_DAYS, lambda p: Path(p).is_dir())
     fp = fingerprint(project_skill_files(claude_home, cwd))
     if force or index.stored_fingerprint(segment) != fp:
         index.replace_segment(segment, project_skills(cwd) + project_plugin_skills(claude_home, cwd), fp)

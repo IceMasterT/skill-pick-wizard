@@ -275,3 +275,41 @@ def test_single_ranking_across_segments(tmp_path):
     i.replace_segment("project:a", [_skill("zz-proj", "Does many other things, mentions alpha in passing")], "fa")
     hits = invokes(i.search(["alpha"]))
     assert hits[-1] == "zz-proj" and set(hits[:3]) == {"widget-0", "widget-1", "widget-2"}
+
+
+def _seeded(tmp_path, paths):
+    i = SkillIndex(tmp_path / "prune.db")
+    i.replace_segment("global", [_skill("g1", "alpha")], "fg")
+    for seg, path in paths.items():
+        i.replace_segment(seg, [_skill(f"{seg[-1]}-skill", "beta")], "f")
+        i.touch_segment(seg, path, 1_000_000.0)
+    return i
+
+
+def test_prune_drops_missing_path_keeps_others(tmp_path):
+    i = _seeded(tmp_path, {"project:a": "/gone", "project:b": "/here", "project:c": "/here2"})
+    dropped = i.prune_segments("project:c", 1_000_100.0, 30, lambda p: p != "/gone")
+    assert dropped == ["project:a"]
+    assert i.all("project:a") == [] and i.stored_fingerprint("project:a") is None
+    assert i.count("project:b") == 1 and i.count("global") == 1
+
+
+def test_prune_drops_unused_for_30_days_keeps_recent(tmp_path):
+    i = _seeded(tmp_path, {"project:a": "/p", "project:b": "/p2"})
+    i.touch_segment("project:b", "/p2", 1_000_000.0 + 29 * 86400)
+    now = 1_000_000.0 + 31 * 86400
+    assert i.prune_segments("project:z", now, 30, lambda p: True) == ["project:a"]
+    assert i.count("project:b") == 1
+
+
+def test_prune_never_drops_current_or_global(tmp_path):
+    i = _seeded(tmp_path, {"project:a": "/gone"})
+    assert i.prune_segments("project:a", 1_000_000.0 + 99 * 86400, 30, lambda p: False) == []
+    assert i.count("project:a") == 1 and i.count("global") == 1
+    assert invokes(i.search(["alpha"])) == ["g1"]
+
+
+def test_touch_writes_only_when_stale(tmp_path):
+    i = _seeded(tmp_path, {"project:a": "/p"})
+    i.touch_segment("project:a", "/p", 1_000_010.0)  # within an hour: no rewrite
+    assert i.prune_segments("x", 1_000_000.0 + 31 * 86400, 30, lambda p: True) == ["project:a"]

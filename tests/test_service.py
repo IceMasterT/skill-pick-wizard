@@ -171,3 +171,33 @@ def test_other_projects_segment_not_visible(env):
     assert invokes(service.search(env.claude_home, other, env.data, cfg, ["zebra"])) == ["theirs"]
     assert service.search(env.claude_home, env.cwd, env.data, cfg, ["zebra"]) == []
     assert "theirs" not in service.known_invokes(env.claude_home, env.cwd, env.data, cfg)
+
+
+def test_deleted_project_dir_pruned_recent_and_current_kept(env):
+    import shutil
+    cfg = cfg_for(env)
+    gone = env.cwd.parent / "gone"
+    kept = env.cwd.parent / "kept"
+    for d, name in ((gone, "gone-skill"), (kept, "kept-skill")):
+        make_skill(d / ".claude" / "skills", name, "description: pruning check")
+        service.search(env.claude_home, d, env.data, cfg, ["pruning"])
+    make_skill(env.cwd / ".claude" / "skills", "cur-skill", "description: pruning check")
+    index = service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
+    assert index.count(service.project_segment(gone)) == 1
+    shutil.rmtree(gone)
+    index = service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
+    assert index.count(service.project_segment(gone)) == 0
+    assert index.count(service.project_segment(kept)) == 1
+    assert index.count(service.project_segment(env.cwd)) == 1
+
+
+def test_project_unused_for_30_days_pruned(env, monkeypatch):
+    import time as real_time
+    base = real_time.time()
+    cfg = cfg_for(env)
+    old = env.cwd.parent / "old"
+    make_skill(old / ".claude" / "skills", "old-skill", "description: pruning check")
+    service.search(env.claude_home, old, env.data, cfg, ["pruning"])
+    monkeypatch.setattr(service.time, "time", lambda: base + 31 * 86400)
+    index = service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
+    assert index.count(service.project_segment(old)) == 0
