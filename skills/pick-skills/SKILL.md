@@ -24,8 +24,9 @@ Follow the steps in order. Work through steps 0 to 6 without commentary: the use
 ## 1. Stages
 
 1. Break the job into 2 to 4 stages in work order (for example Planning, Building, Checking). Give each stage a label of one or two plain words.
-2. For each stage write 1 to 3 search queries in the job's own terms, plus synonyms (for example `checkout flow`, `payment form`).
-3. Put the stack and domain the job names into the queries (for example `stripe`, `react`, `postgres`).
+2. Write at most 6 queries in total, 1 or 2 per stage.
+3. Write each query the way a skill description would describe that work, in a few words: `harden code against vulnerabilities`, `verify work before claiming it is done`, `write the failing test first`, `add stripe checkout to a react site`. Never use a bare category word such as `security`, `review` or `testing`: it matches hundreds of skills and buries the ones that fit.
+4. Put the stack and domain the job names into the queries (for example `stripe`, `react`, `postgres`).
 
 ## 2. Search
 
@@ -36,8 +37,8 @@ Follow the steps in order. Work through steps 0 to 6 without commentary: the use
    ```
 
    When `status` printed `deep_scan: on`, send this command and the step 3 `catalog` command as two Bash calls in the same message; both need only the stages.
-2. It prints about 30 candidates. Each is a line `` `<invoke>`  [<tags>]  (matched: <queries>) `` followed by the skill's full description. The first run can take a few seconds while the index builds.
-3. If it prints `no matches`, or only skills unrelated to the job, rewrite the queries once with broader words (for example `planning`, `testing`, `debugging`, `code review`) and search again.
+2. It prints up to 30 candidates, each query's best matches first. Each is a line `` `<invoke>`  [<tags>]  (matched: <queries>) `` followed by the skill's full description. The first run can take a few seconds while the index builds.
+3. If it prints `no matches`, or only skills unrelated to the job, rewrite the queries once, describing the same work in other words (synonyms, or the stack's own terms), and search again.
 
 ## 3. Deep scan (only when `deep_scan: on`)
 

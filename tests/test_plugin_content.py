@@ -375,3 +375,15 @@ def test_skill_name_does_not_collide_with_a_command():
     commands = {p.stem for p in COMMANDS.glob("*.md")}
     skills = {p.name for p in (REPO / "skills").iterdir() if p.is_dir()}
     assert commands.isdisjoint(skills), commands & skills
+
+
+def test_query_guidance_caps_queries_and_asks_for_descriptive_wording():
+    stages = _section(_read(SKILL), "## 1. Stages", "## 2.")
+    assert "at most 6 queries" in stages
+    assert "1 or 2 per stage" in stages
+    assert "the way a skill description would" in stages
+    for bare in ("`security`", "`review`", "`testing`"):
+        assert bare in stages  # named as the bare category words to avoid
+    search = _section(_read(SKILL), "## 2. Search", "## 3.")
+    assert "broader words" not in search  # the retry must not fall back to bare category words
+    assert "planning`, `testing`" not in search

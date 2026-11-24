@@ -55,11 +55,111 @@ def test_multi_query_merge_rrf(idx):
     assert by["test-driven-development"].queries == ("write tests first",)
 
 
-def test_skill_hit_by_two_queries_ranks_higher(idx):
-    hits = idx.search(["speed up rendering", "rendering latency", "write tests first"])
-    assert hits[0].skill.invoke == "performance-optimization"
-    assert hits[0].queries == ("speed up rendering", "rendering latency")
-    assert hits[0].score > hits[1].score
+# Regression fixture for multi-query fusion: six skills that are each the clear best match for one
+# query, buried among decoys that loosely match several queries with generic words.
+_TARGETS = {
+    "write the failing tests first": _skill(
+        "test-driven-development", "Write the failing tests first, then the code that makes them pass"),
+    "harden code against vulnerabilities": _skill(
+        "security-and-hardening", "Harden code against vulnerabilities: validate input, guard secrets"),
+    "verify work before claiming it is done": _skill(
+        "verification-before-completion", "Verify work before claiming it is done by running the checks"),
+    "build frontend ui components": _skill(
+        "frontend-ui-engineering", "Build frontend UI components, layouts and styles for web pages"),
+    "brainstorm design options": _skill(
+        "brainstorming", "Brainstorm design options and intent before building anything"),
+    "stripe checkout payment": _skill(
+        "stripe-payments", "Stripe checkout payment and billing integration"),
+}
+_GENERIC = ["write", "tests", "code", "against", "work", "before", "build", "components",
+            "design", "options", "checkout", "payment", "first", "frontend", "done", "verify"]
+
+
+def _decoys(n=50):
+    """Each decoy names many generic query words, so it loosely matches most queries at once."""
+    out = []
+    for i in range(n):
+        words = [_GENERIC[(i + k * 3) % len(_GENERIC)] for k in range(8)]
+        out.append(_skill(f"decoy-{i:02d}", "Helps with " + " and ".join(words) + " in general projects"))
+    return out
+
+
+@pytest.fixture
+def fusion_idx(tmp_path):
+    i = SkillIndex(tmp_path / "fusion.db")
+    i.replace_segment("global", list(_TARGETS.values()) + _decoys(), "f")
+    return i
+
+
+def test_each_fixture_query_has_its_target_on_top(fusion_idx):
+    for query, target in _TARGETS.items():
+        assert invokes(fusion_idx.search([query]))[0] == target.invoke, query
+
+
+def test_each_query_top_hit_survives_fusion_with_five_others(fusion_idx):
+    hits = fusion_idx.search(list(_TARGETS))
+    top = invokes(hits[:len(_TARGETS)])
+    assert set(top) == {t.invoke for t in _TARGETS.values()}
+    by = {h.skill.invoke: h for h in hits}
+    for query, target in _TARGETS.items():
+        assert query in by[target.invoke].queries
+
+
+def test_fused_order_is_best_rank_then_rrf_then_invoke(tmp_path):
+    i = SkillIndex(tmp_path / "o.db")
+    i.replace_segment("global", [
+        _skill("alpha-one", "alpha"),
+        _skill("beta-one", "beta"),
+        _skill("both", "alpha beta words and more words to lower its bm25 rank for each query"),
+    ], "f")
+    hits = i.search(["alpha", "beta"])
+    # alpha-one and beta-one are each rank 0 for one query; "both" is rank 1 in two queries.
+    assert invokes(hits) == ["alpha-one", "beta-one", "both"]
+    assert hits[2].queries == ("alpha", "beta")
+    assert hits[2].score > hits[0].score  # higher RRF sum, still ranked after the rank-0 hits
+
+
+def test_each_query_list_is_truncated_to_limit(tmp_path):
+    i = SkillIndex(tmp_path / "t.db")
+    i.replace_segment("global", [_skill(f"s{n:02d}", "common " + "pad " * n) for n in range(10)]
+                      + [_skill("other", "rare")], "f")
+    hits = i.search(["common", "rare"], limit=3)
+    # Each query contributes at most `limit` hits; "other" is rank 0 for "rare", so it is kept.
+    assert invokes(hits) == ["other", "s00", "s01"]
+    assert all(h.queries == ("common",) for h in hits[1:])
+
+
+def test_matched_lists_only_queries_whose_top_list_has_the_hit(tmp_path):
+    i = SkillIndex(tmp_path / "m.db")
+    i.replace_segment("global", [_skill(f"x{n:02d}", "zeta " + "pad " * n) for n in range(5)]
+                      + [_skill("y", "zeta pad pad pad pad pad pad pad pad eta")], "f")
+    hits = {h.skill.invoke: h for h in i.search(["eta", "zeta"], limit=2)}
+    assert hits["y"].queries == ("eta",)  # y matches "zeta" too, but below that query's top 2
+
+
+def test_stop_words_are_dropped_unless_nothing_remains():
+    from skillpick.index import query_terms
+    assert query_terms("how to write the tests for it") == ["write", "tests"]
+    assert query_terms("the and of") == ["the", "and", "of"]
+    assert query_terms("Tests tests TESTS") == ["tests"]
+    assert query_terms("!!!") == []
+
+
+def test_hit_must_match_at_least_half_of_the_query_terms(tmp_path):
+    i = SkillIndex(tmp_path / "h.db")
+    i.replace_segment("global", [
+        _skill("one-of-four", "kubernetes only"),
+        _skill("two-of-four", "kubernetes cluster"),
+        _skill("all-four", "kubernetes cluster autoscaling costs"),
+    ], "f")
+    assert invokes(i.search(["kubernetes cluster autoscaling costs"])) == ["all-four", "two-of-four"]
+    # Three terms need two matches.
+    assert invokes(i.search(["kubernetes cluster nothing"])) == ["two-of-four", "all-four"]
+
+
+def test_query_without_a_real_match_returns_nothing(idx):
+    # Only stop words match broadly; with the real terms gone nothing is returned.
+    assert idx.search(["the quantum entanglement of it"]) == []
 
 
 def test_tags_searchable(idx):
@@ -137,7 +237,7 @@ def test_get_and_all(idx):
 
 
 def test_build_fts_query():
-    assert build_fts_query("Speed-up: rendering!") == '"speed" OR "up" OR "rendering"'
+    assert build_fts_query("Speed-up: rendering!") == '"speed" OR "rendering"'
     assert build_fts_query("AND") == '"and"'
     assert build_fts_query("!!! ") is None
     assert build_fts_query("") is None
@@ -373,3 +473,12 @@ def test_count_matches_all(tmp_path):
     i.replace_segment("global", [_skill("a", "x"), _skill("b", "x")], "f")
     i.replace_segment("project:a", [_skill("c", "x")], "f", path="/p")
     assert (i.count(), i.count("global"), i.count("project:a"), i.count("nope")) == (3, 2, 1, 0)
+
+
+def test_segment_is_the_final_tie_break(tmp_path):
+    i = SkillIndex(tmp_path / "tie.db")
+    i.replace_segment("project:a", [_skill("dup", "beta")], "f")
+    i.replace_segment("global", [_skill("dup", "alpha")], "f")
+    for queries in (["beta", "alpha"], ["alpha", "beta"]):
+        hits = i.search(queries)
+        assert [h.skill.description for h in hits] == ["alpha", "beta"], queries  # "global" < "project:a"

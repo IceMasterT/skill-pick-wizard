@@ -199,3 +199,21 @@ def test_pick_rejects_old_python_before_importing_skillpick(tmp_path):
     assert r.returncode == 2
     assert "skill-pick-wizard needs Python 3.10 or newer" in r.stderr
     assert "imported" not in r.stderr
+
+
+def _count_hits(out: str) -> int:
+    return sum(1 for line in out.splitlines() if line.startswith("`"))
+
+
+def test_search_limit_scales_with_query_count(env, capsys):
+    for n in range(40):
+        make_skill(env.claude_home / "skills", f"s{n:02d}", f"description: common thing number {n}")
+    one = run(capsys, "search", "--cwd", str(env.cwd), "common")
+    assert one[0] == 0 and _count_hits(one[1]) == 30
+    queries = [f"common extra{k}" for k in range(7)]
+    seven = run(capsys, "search", "--cwd", str(env.cwd), *queries)
+    assert _count_hits(seven[1]) == 35  # max(30, 5 x 7)
+    repeated = run(capsys, "search", "--cwd", str(env.cwd), *(["common"] * 7))
+    assert _count_hits(repeated[1]) == 30  # duplicate queries count once
+    explicit = run(capsys, "search", "--cwd", str(env.cwd), "--limit", "3", *queries)
+    assert _count_hits(explicit[1]) == 3

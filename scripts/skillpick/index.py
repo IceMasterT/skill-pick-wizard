@@ -1,10 +1,15 @@
-"""SQLite FTS5 index of skills with multi-query reciprocal-rank-fusion search.
+"""SQLite FTS5 index of skills with multi-query search.
 
 One database holds every segment ("global", "project:<key>", ...) so a search ranks one corpus.
 Each segment is replaced independently and carries its own fingerprint.
+
+Search: each query keeps only skills that match at least half of its (non-stop-word) terms,
+ranked by BM25 and cut to the top `limit`. The per-query lists are fused by each skill's best
+rank in any list, then by its reciprocal-rank-fusion score, so every query's best hits survive.
 """
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
@@ -64,16 +69,41 @@ def fingerprint(files: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def build_fts_query(text: str) -> str | None:
-    """Turn free text into a safe FTS5 query: every word quoted, joined with OR.
+# English function words: they match most descriptions and say nothing about the work.
+STOP_WORDS = frozenset("""
+a about above after again all also am an and any are as at be been before being below between both
+but by can could did do does doing done down during each either else every few for from further get
+gets got had has have having he her here hers him his how i if in into is it its itself just let me
+more most my no nor not of off on once only onto or other our ours out over own per she should so
+some such than that the their theirs them then there these they this those through to too under
+until up upon us very via was we were what when where which while who whom why will with would yet
+you your yours
+""".split())
 
-    Only runs of Unicode letters/digits survive, so no FTS5 syntax can leak through, and quoting
-    makes bare operators such as AND/OR/NOT/NEAR plain phrases.
+
+def query_terms(text: str) -> list[str]:
+    """Distinct lower-cased words of a query, without stop words (all words if only stop words remain).
+
+    Only runs of Unicode letters/digits survive, so no FTS5 syntax can leak through.
     """
-    words = [w.lower() for w in _WORD.findall(text)]
-    if not words:
-        return None
-    return " OR ".join(f'"{w}"' for w in words)
+    words = list(dict.fromkeys(w.lower() for w in _WORD.findall(text)))
+    return [w for w in words if w not in STOP_WORDS] or words
+
+
+def _quote(term: str) -> str:
+    """A term as an FTS5 string, so bare operators such as AND/OR/NOT/NEAR are plain words."""
+    return f'"{term}"'
+
+
+def build_fts_query(text: str) -> str | None:
+    """The OR of a query's terms (see query_terms) as a safe FTS5 query, or None when it has none."""
+    terms = query_terms(text)
+    return " OR ".join(_quote(t) for t in terms) if terms else None
+
+
+def required_matches(n_terms: int) -> int:
+    """How many of a query's terms a skill must match: at least half of them."""
+    return max(1, math.ceil(n_terms / 2))
 
 
 def _fp_key(segment: str) -> str:
@@ -343,45 +373,61 @@ class SkillIndex:
         allow: Callable[[Skill, str], bool] = lambda skill, segment: True,
         override_segment: str | None = None,
     ) -> list[Hit]:
-        """Reciprocal-rank-fuse the per-query FTS results.
+        """Fuse the per-query FTS results.
 
-        `allow(skill, segment)` is applied to each query's full match list before that query's ranks
-        are assigned, so restrictive filters still fill `limit`. A skill in another segment whose
-        invoke is also allowed in `override_segment` is shadowed by it. All queries and the shadow
-        lookup run inside one read transaction, so a concurrent rebuild can never produce a mixed
-        result. Candidates are keyed by (segment, invoke): the same invoke in two segments stays two hits.
+        Per query: skills matching at least half of its terms (see query_terms, required_matches),
+        ranked by BM25, filtered by `allow(skill, segment)` and shadowing, then cut to the top
+        `limit`, so restrictive filters still fill each list. A skill in another segment whose
+        invoke is also allowed in `override_segment` is shadowed by it.
+
+        Fused order: best (lowest) rank in any query's list, then reciprocal-rank-fusion score over
+        the lists, then invoke, then segment. A hit's `queries` are the queries whose list holds it.
+        All queries, term lookups and the shadow lookup run inside one read transaction, so a
+        concurrent rebuild can never produce a mixed result. Candidates are keyed by
+        (segment, invoke): the same invoke in two segments stays two hits.
         """
+        best: dict[tuple[str, str], int] = {}
         scores: dict[tuple[str, str], float] = {}
         matched: dict[tuple[str, str], list[str]] = {}
         found: dict[tuple[str, str], Skill] = {}
+        term_rows: dict[str, set[int]] = {}
+        select = (
+            "SELECT fts.rowid, " + ", ".join(f"s.{c.strip()}" for c in _COLUMNS.split(",")) + ", s.segment"
+            " FROM fts JOIN skills s ON s.rowid = fts.rowid WHERE fts MATCH ? "
+            "ORDER BY bm25(fts, 10.0, 8.0, 1.0, 3.0), fts.rowid"
+        )
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
             try:
                 shadowed = self._shadowed(conn, allow, override_segment)
                 for query in dict.fromkeys(queries):
-                    fts_query = build_fts_query(query)
-                    if fts_query is None:
+                    terms = query_terms(query)
+                    if not terms:
                         continue
-                    rows = conn.execute(
-                        "SELECT " + ", ".join(f"s.{c.strip()}" for c in _COLUMNS.split(",")) + ", s.segment"
-                        + " FROM fts JOIN skills s ON s.rowid = fts.rowid WHERE fts MATCH ? "
-                        "ORDER BY bm25(fts, 10.0, 8.0, 1.0, 3.0), fts.rowid",
-                        (fts_query,),
-                    ).fetchall()
+                    for term in terms:
+                        if term not in term_rows:
+                            term_rows[term] = {r[0] for r in conn.execute(
+                                "SELECT rowid FROM fts WHERE fts MATCH ?", (_quote(term),))}
+                    need = required_matches(len(terms))
                     rank = 0
-                    for row in rows:
-                        skill, segment = _row_to_skill(row[:-1]), row[-1]
+                    for row in conn.execute(select, (" OR ".join(_quote(t) for t in terms),)):
+                        if rank >= limit:
+                            break
+                        rowid, segment = row[0], row[-1]
+                        if sum(rowid in term_rows[t] for t in terms) < need:
+                            continue
+                        skill = _row_to_skill(row[1:-1])
                         if not allow(skill, segment):
                             continue
                         if segment != override_segment and skill.invoke in shadowed:
                             continue
                         key = (segment, skill.invoke)
                         found[key] = skill
+                        best[key] = min(best.get(key, rank), rank)
                         scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
                         matched.setdefault(key, []).append(query)
                         rank += 1
             finally:
                 conn.execute("COMMIT")
-        hits = [Hit(found[k], scores[k], tuple(matched[k])) for k in scores]
-        hits.sort(key=lambda h: (-h.score, h.skill.invoke))
-        return hits[:limit]
+        order = sorted(found, key=lambda k: (best[k], -scores[k], k[1], k[0]))
+        return [Hit(found[k], scores[k], tuple(matched[k])) for k in order[:limit]]

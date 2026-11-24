@@ -218,7 +218,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("status", cmd_status, session=True)
     p = add("search", cmd_search, cwd=True)
-    p.add_argument("--limit", type=_positive_int, default=30)
+    p.add_argument("--limit", type=_positive_int,
+                   help="number of candidates (default: 30, or 5 per query when there are more than 6)")
     p.add_argument("queries", nargs="+", metavar="QUERY")
     p = add("save-plan", cmd_save_plan, session=True, cwd=True)
     p.add_argument("--job", required=True)

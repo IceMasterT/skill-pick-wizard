@@ -89,9 +89,21 @@ def known_invokes(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> set[
     return {s.invoke for s in allowed_skills(claude_home, cwd, data, cfg)}
 
 
+MIN_CANDIDATES = 30
+CANDIDATES_PER_QUERY = 5
+
+
+def candidate_limit(queries: list[str]) -> int:
+    """Default number of search candidates: 30, or 5 per distinct query when there are more than 6."""
+    return max(MIN_CANDIDATES, CANDIDATES_PER_QUERY * len(dict.fromkeys(queries)))
+
+
 def search(
-    claude_home: Path, cwd: Path, data: Path, cfg: Config, queries: list[str], limit: int = 30
+    claude_home: Path, cwd: Path, data: Path, cfg: Config, queries: list[str], limit: int | None = None
 ) -> list[Hit]:
+    """Search candidates; `limit` defaults to candidate_limit(queries)."""
+    if limit is None:
+        limit = candidate_limit(queries)
     view = _View(claude_home, cwd, data, cfg)
     return view.index.search(queries, limit, view.allow, view.project)
 
