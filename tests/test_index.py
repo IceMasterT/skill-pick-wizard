@@ -271,10 +271,11 @@ def test_failed_segment_replace_keeps_other_and_old_rows(tmp_path):
 def test_single_ranking_across_segments(tmp_path):
     """A passing mention in a project skill must not outrank real matches in the global segment."""
     i = SkillIndex(tmp_path / "seg.db")
+    # Project segment first: rowid order favours it, so only bm25 can demote it.
+    i.replace_segment("project:a", [_skill("aa-proj", "Does many other things, mentions alpha in passing")], "fa")
     i.replace_segment("global", [_skill(f"widget-{n}", "alpha widget") for n in range(3)], "fg")
-    i.replace_segment("project:a", [_skill("zz-proj", "Does many other things, mentions alpha in passing")], "fa")
     hits = invokes(i.search(["alpha"]))
-    assert hits[-1] == "zz-proj" and set(hits[:3]) == {"widget-0", "widget-1", "widget-2"}
+    assert hits[-1] == "aa-proj" and set(hits[:3]) == {"widget-0", "widget-1", "widget-2"}
 
 
 def _seeded(tmp_path, paths):
@@ -313,3 +314,62 @@ def test_touch_writes_only_when_stale(tmp_path):
     i = _seeded(tmp_path, {"project:a": "/p"})
     i.touch_segment("project:a", "/p", 1_000_010.0)  # within an hour: no rewrite
     assert i.prune_segments("x", 1_000_000.0 + 31 * 86400, 30, lambda p: True) == ["project:a"]
+
+
+def test_same_invoke_in_two_segments_stays_two_candidates(tmp_path):
+    i = SkillIndex(tmp_path / "n1.db")
+    i.replace_segment("global", [_skill("dup", "common words")], "f")
+    i.replace_segment("project:a", [_skill("dup", "common words")], "f")
+    hits = i.search(["common"])
+    assert len(hits) == 2
+    assert all(h.score == pytest.approx(1 / 60) or h.score == pytest.approx(1 / 61) for h in hits)
+    assert len(i.visible()) == 2
+
+
+def test_override_segment_shadows_inside_snapshot(tmp_path):
+    i = SkillIndex(tmp_path / "n1.db")
+    i.replace_segment("global", [_skill("dup", "common words"), _skill("only-g", "common words")], "f")
+    i.replace_segment("project:a", [_skill("dup", "common words proj", plugin="p@m")], "f")
+    hits = i.search(["common"], override_segment="project:a")
+    assert sorted(h.skill.description for h in hits) == ["common words", "common words proj"]
+    assert {h.skill.invoke for h in hits} == {"dup", "only-g"}
+    assert [s.source for s in i.visible(override_segment="project:a") if s.invoke == "dup"] == ["plugin"]
+    # a shadower rejected by allow does not shadow
+    deny = lambda s, seg: s.plugin_id is None
+    assert [s.source for s in i.visible(deny, "project:a") if s.invoke == "dup"] == ["user"]
+    assert [h.skill.source for h in i.search(["common"], allow=deny, override_segment="project:a") if h.skill.invoke == "dup"] == ["user"]
+
+
+def test_replace_segment_records_usage_and_metadataless_project_segment_pruned(tmp_path):
+    i = SkillIndex(tmp_path / "n2.db")
+    i.replace_segment("project:a", [_skill("a1", "x")], "f", path="/p", now=1_000_000.0)
+    i.replace_segment("project:b", [_skill("b1", "x")], "f")  # no metadata
+    assert i.prune_segments("project:z", 1_000_100.0, 30, lambda p: True) == ["project:b"]
+    assert i.count("project:a") == 1 and i.count("project:b") == 0
+
+
+def test_prune_takes_no_write_lock_when_nothing_stale(tmp_path):
+    import sqlite3
+    i = SkillIndex(tmp_path / "n3.db")
+    i.replace_segment("project:a", [_skill("a1", "x")], "f", path="/p", now=1_000_000.0)
+    checked = []
+
+    def exists(path):
+        other = sqlite3.connect(i.db_path, timeout=0.1, isolation_level=None)
+        try:
+            other.execute("BEGIN IMMEDIATE")  # raises "database is locked" if prune held a write lock
+            other.execute("ROLLBACK")
+        finally:
+            other.close()
+        checked.append(path)
+        return True
+
+    assert i.prune_segments("project:z", 1_000_100.0, 30, exists) == []
+    assert checked == ["/p"]
+
+
+def test_count_matches_all(tmp_path):
+    i = SkillIndex(tmp_path / "c.db")
+    i.replace_segment("global", [_skill("a", "x"), _skill("b", "x")], "f")
+    i.replace_segment("project:a", [_skill("c", "x")], "f", path="/p")
+    assert (i.count(), i.count("global"), i.count("project:a"), i.count("nope")) == (3, 2, 1, 0)

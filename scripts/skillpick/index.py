@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
@@ -91,6 +92,11 @@ def _used_key(segment: str) -> str:
 _TOUCH_INTERVAL = 3600.0
 
 
+def _write_usage(conn: sqlite3.Connection, segment: str, path: str, now: float) -> None:
+    conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_path_key(segment), path))
+    conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_used_key(segment), repr(now)))
+
+
 def _invoke_text(invoke: str) -> str:
     return re.sub(r"[-:_]+", " ", invoke)
 
@@ -147,8 +153,14 @@ class SkillIndex:
             row = conn.execute("SELECT v FROM meta WHERE k = ?", (_fp_key(segment),)).fetchone()
         return row[0] if row else None
 
-    def replace_segment(self, segment: str, skills: list[Skill], fp: str) -> None:
-        """Replace one segment's rows and fingerprint in a single transaction; other segments are untouched."""
+    def replace_segment(
+        self, segment: str, skills: list[Skill], fp: str, path: str | None = None, now: float | None = None
+    ) -> None:
+        """Replace one segment's rows and fingerprint in a single transaction; other segments are untouched.
+
+        With `path`, the segment's project path and last-used time (`now`, default the current time)
+        are recorded in the same transaction, so a project segment never exists without them.
+        """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -175,6 +187,8 @@ class SkillIndex:
                 conn.execute(
                     "INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_fp_key(segment), fp)
                 )
+                if path is not None:
+                    _write_usage(conn, segment, path, time.time() if now is None else now)
                 conn.execute("COMMIT")
             except BaseException:
                 try:
@@ -200,8 +214,7 @@ class SkillIndex:
                 return
             conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_path_key(segment), path))
-                conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (_used_key(segment), repr(now)))
+                _write_usage(conn, segment, path, now)
                 conn.execute("COMMIT")
             except BaseException:
                 try:
@@ -210,33 +223,50 @@ class SkillIndex:
                     pass
                 raise
 
+    @staticmethod
+    def _prune_candidates(
+        conn: sqlite3.Connection, keep: str, cutoff: float, path_exists: Callable[[str], bool],
+        only: set[str] | None = None,
+    ) -> list[str]:
+        meta = dict(conn.execute("SELECT k, v FROM meta WHERE k LIKE 'used:project:%' OR k LIKE 'path:project:%'"))
+        segments = {k[len("used:"):] for k in meta if k.startswith("used:")}
+        segments |= {r[0] for r in conn.execute("SELECT DISTINCT segment FROM skills WHERE segment LIKE 'project:%'")}
+        out = []
+        for segment in sorted(segments):
+            if segment == keep or (only is not None and segment not in only):
+                continue
+            used, path = meta.get(_used_key(segment)), meta.get(_path_key(segment))
+            try:
+                stale = used is None or float(used) < cutoff
+            except ValueError:
+                stale = True
+            if stale or path is None or not path_exists(path):
+                out.append(segment)
+        return out
+
     def prune_segments(
         self, keep: str, now: float, max_age_days: float, path_exists: Callable[[str], bool]
     ) -> list[str]:
-        """Drop project segments whose recorded path is gone or that were unused for max_age_days.
+        """Drop project segments whose recorded path is gone, that were unused for max_age_days,
+        or that have no usage metadata. The "global" segment and `keep` are never dropped.
 
-        One transaction. The "global" segment and `keep` are never dropped; segments without
-        usage metadata are left alone. Returns the dropped segment names.
+        Candidates are selected (including the path checks) in a read snapshot; a write
+        transaction is opened only when there is something to drop, and the candidates are
+        re-verified inside it. Returns the dropped segment names.
         """
         cutoff = now - max_age_days * 86400
-        dropped: list[str] = []
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            try:
+                candidates = self._prune_candidates(conn, keep, cutoff, path_exists)
+            finally:
+                conn.execute("COMMIT")
+            if not candidates:
+                return []
             conn.execute("BEGIN IMMEDIATE")
             try:
-                meta = dict(conn.execute("SELECT k, v FROM meta").fetchall())
-                for key, used in meta.items():
-                    if not key.startswith("used:project:"):
-                        continue
-                    segment = key[len("used:"):]
-                    if segment == keep:
-                        continue
-                    try:
-                        stale = float(used) < cutoff
-                    except ValueError:
-                        stale = True
-                    path = meta.get(_path_key(segment))
-                    if not (stale or path is None or not path_exists(path)):
-                        continue
+                dropped = self._prune_candidates(conn, keep, cutoff, path_exists, set(candidates))
+                for segment in dropped:
                     conn.execute(
                         "DELETE FROM fts WHERE rowid IN (SELECT rowid FROM skills WHERE segment = ?)",
                         (segment,),
@@ -246,7 +276,6 @@ class SkillIndex:
                         "DELETE FROM meta WHERE k IN (?, ?, ?)",
                         (_fp_key(segment), _path_key(segment), _used_key(segment)),
                     )
-                    dropped.append(segment)
                 conn.execute("COMMIT")
             except BaseException:
                 try:
@@ -257,7 +286,9 @@ class SkillIndex:
         return dropped
 
     def count(self, segment: str | None = None) -> int:
-        return len(self.all(segment))
+        where, params = ("WHERE segment = ?", (segment,)) if segment is not None else ("", ())
+        with closing(self._connect()) as conn:
+            return conn.execute(f"SELECT COUNT(*) FROM skills {where}", params).fetchone()[0]
 
     def all(self, segment: str | None = None) -> list[Skill]:
         """Skills of one segment, or of every segment when segment is None."""
@@ -275,24 +306,58 @@ class SkillIndex:
             ).fetchone()
         return _row_to_skill(row) if row else None
 
+    @staticmethod
+    def _shadowed(conn, allow, override_segment: str | None) -> set[str]:
+        if override_segment is None:
+            return set()
+        rows = conn.execute(
+            f"SELECT {_COLUMNS} FROM skills WHERE segment = ?", (override_segment,)
+        ).fetchall()
+        return {r[0] for r in rows if allow(_row_to_skill(r), override_segment)}
+
+    def visible(
+        self,
+        allow: Callable[[Skill, str], bool] = lambda skill, segment: True,
+        override_segment: str | None = None,
+    ) -> list[Skill]:
+        """Every skill passing `allow`, sorted by invoke. Rows of other segments whose invoke is
+        also (allowed) in `override_segment` are shadowed. One read snapshot."""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            try:
+                shadowed = self._shadowed(conn, allow, override_segment)
+                rows = conn.execute(f"SELECT {_COLUMNS}, segment FROM skills").fetchall()
+            finally:
+                conn.execute("COMMIT")
+        skills = [
+            _row_to_skill(r[:-1]) for r in rows
+            if allow(_row_to_skill(r[:-1]), r[-1])
+            and (r[-1] == override_segment or r[0] not in shadowed)
+        ]
+        return sorted(skills, key=lambda s: s.invoke)
+
     def search(
         self,
         queries: list[str],
         limit: int = 30,
         allow: Callable[[Skill, str], bool] = lambda skill, segment: True,
+        override_segment: str | None = None,
     ) -> list[Hit]:
         """Reciprocal-rank-fuse the per-query FTS results.
 
         `allow(skill, segment)` is applied to each query's full match list before that query's ranks
-        are assigned, so restrictive filters still fill `limit`. All queries run inside
-        one read transaction, so a concurrent rebuild can never produce a mixed result.
+        are assigned, so restrictive filters still fill `limit`. A skill in another segment whose
+        invoke is also allowed in `override_segment` is shadowed by it. All queries and the shadow
+        lookup run inside one read transaction, so a concurrent rebuild can never produce a mixed
+        result. Candidates are keyed by (segment, invoke): the same invoke in two segments stays two hits.
         """
-        scores: dict[str, float] = {}
-        matched: dict[str, list[str]] = {}
-        found: dict[str, Skill] = {}
+        scores: dict[tuple[str, str], float] = {}
+        matched: dict[tuple[str, str], list[str]] = {}
+        found: dict[tuple[str, str], Skill] = {}
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
             try:
+                shadowed = self._shadowed(conn, allow, override_segment)
                 for query in dict.fromkeys(queries):
                     fts_query = build_fts_query(query)
                     if fts_query is None:
@@ -305,12 +370,15 @@ class SkillIndex:
                     ).fetchall()
                     rank = 0
                     for row in rows:
-                        skill = _row_to_skill(row[:-1])
-                        if not allow(skill, row[-1]):
+                        skill, segment = _row_to_skill(row[:-1]), row[-1]
+                        if not allow(skill, segment):
                             continue
-                        found[skill.invoke] = skill
-                        scores[skill.invoke] = scores.get(skill.invoke, 0.0) + 1.0 / (_RRF_K + rank)
-                        matched.setdefault(skill.invoke, []).append(query)
+                        if segment != override_segment and skill.invoke in shadowed:
+                            continue
+                        key = (segment, skill.invoke)
+                        found[key] = skill
+                        scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+                        matched.setdefault(key, []).append(query)
                         rank += 1
             finally:
                 conn.execute("COMMIT")

@@ -82,9 +82,9 @@ def test_rebuild_only_when_changed(env, monkeypatch):
     calls = []
     original = SkillIndex.replace_segment
 
-    def counting(self, segment, skills, fp):
+    def counting(self, segment, skills, fp, **kw):
         calls.append(segment)
-        return original(self, segment, skills, fp)
+        return original(self, segment, skills, fp, **kw)
 
     monkeypatch.setattr(SkillIndex, "replace_segment", counting)
     cfg = cfg_for(env)
@@ -131,7 +131,7 @@ def test_force_rebuild(env, monkeypatch):
     calls = []
     original = SkillIndex.replace_segment
     monkeypatch.setattr(
-        SkillIndex, "replace_segment", lambda self, seg, s, fp: (calls.append(seg), original(self, seg, s, fp))
+        SkillIndex, "replace_segment", lambda self, seg, s, fp, **kw: (calls.append(seg), original(self, seg, s, fp, **kw))
     )
     service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
     assert calls == []
@@ -147,7 +147,7 @@ def test_project_rebuild_independent_of_global(env, monkeypatch):
     calls = []
     original = SkillIndex.replace_segment
     monkeypatch.setattr(
-        SkillIndex, "replace_segment", lambda self, seg, s, fp: (calls.append(seg), original(self, seg, s, fp))
+        SkillIndex, "replace_segment", lambda self, seg, s, fp, **kw: (calls.append(seg), original(self, seg, s, fp, **kw))
     )
     os.utime(md, ns=(1, 777))
     service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
@@ -155,11 +155,13 @@ def test_project_rebuild_independent_of_global(env, monkeypatch):
 
 
 def test_one_ranking_across_global_and_project(env):
+    # Project segment is built first, so only bm25 (not rowid order) can demote it.
+    make_skill(env.cwd / ".claude" / "skills", "aa-proj", "description: does many things and mentions alpha in passing")
+    service.fresh_index(env.claude_home, env.cwd, env.data, cfg_for(env))
     for n in range(3):
         make_skill(env.claude_home / "skills", f"widget-{n}", "description: alpha widget")
-    make_skill(env.cwd / ".claude" / "skills", "zz-proj", "description: does many things and mentions alpha in passing")
     hits = invokes(service.search(env.claude_home, env.cwd, env.data, cfg_for(env), ["alpha"]))
-    assert hits[-1] == "zz-proj"
+    assert hits[-1] == "aa-proj"
     assert set(hits[:3]) == {"widget-0", "widget-1", "widget-2"}
 
 
@@ -201,3 +203,15 @@ def test_project_unused_for_30_days_pruned(env, monkeypatch):
     monkeypatch.setattr(service.time, "time", lambda: base + 31 * 86400)
     index = service.fresh_index(env.claude_home, env.cwd, env.data, cfg)
     assert index.count(service.project_segment(old)) == 0
+
+
+def test_shadowing_consistent_and_disabled_project_plugin_does_not_shadow(env):
+    on = make_plugin(env, "pp", {"dup": "common words"})
+    write_json(env.cwd / ".claude" / "settings.json", {"enabledPlugins": {"pp@m": False}})
+    install(env, {"pp@m": [{"scope": "project", "projectPath": str(env.cwd), "installPath": str(on),
+                            "lastUpdated": "2026-01-01T00:00:00Z"}]})
+    make_skill(env.claude_home / "skills", "pp:dup", "description: common words")
+    cfg = cfg_for(env)
+    [hit] = service.search(env.claude_home, env.cwd, env.data, cfg, ["common"])
+    assert hit.skill.source == "user"  # the disabled project-scope plugin skill must not shadow it
+    assert [s.source for s in service.allowed_skills(env.claude_home, env.cwd, env.data, cfg)] == ["user"]

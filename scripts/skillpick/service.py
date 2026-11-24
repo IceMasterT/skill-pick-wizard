@@ -51,38 +51,33 @@ def fresh_index(
         index.replace_segment(GLOBAL, _with_vault_tags(skills, vault.area_tags(vault_dir)), fp)
 
     segment = project_segment(cwd)
-    index.touch_segment(segment, str(Path(cwd).resolve()), time.time())
+    project_path = str(Path(cwd).resolve())
+    index.touch_segment(segment, project_path, time.time())
     index.prune_segments(segment, time.time(), PROJECT_MAX_AGE_DAYS, lambda p: Path(p).is_dir())
     fp = fingerprint(project_skill_files(claude_home, cwd))
     if force or index.stored_fingerprint(segment) != fp:
-        index.replace_segment(segment, project_skills(cwd) + project_plugin_skills(claude_home, cwd), fp)
+        index.replace_segment(
+            segment, project_skills(cwd) + project_plugin_skills(claude_home, cwd), fp, path=project_path
+        )
     return index
 
 
 class _View:
-    """What this project may use: the single place that decides plugin enablement and project shadowing."""
+    """What this project may use. Plugin enablement is decided here; project-over-global shadowing is
+    applied by the index inside the same read snapshot as the query."""
 
     def __init__(self, claude_home: Path, cwd: Path, data: Path, cfg: Config, force: bool = False):
         self.index = fresh_index(claude_home, cwd, data, cfg, force)
         self.project = project_segment(cwd)
         self._enabled = enabled_plugin_ids(claude_home, cwd)
-        self._shadowed = {
-            s.invoke for s in self.index.all(self.project) if self._plugin_ok(s)
-        }
-
-    def _plugin_ok(self, skill: Skill) -> bool:
-        return skill.plugin_id is None or skill.plugin_id in self._enabled
 
     def allow(self, skill: Skill, segment: str) -> bool:
-        if not self._plugin_ok(skill):
+        if segment not in (GLOBAL, self.project):
             return False
-        if segment == self.project:
-            return True
-        return segment == GLOBAL and skill.invoke not in self._shadowed
+        return skill.plugin_id is None or skill.plugin_id in self._enabled
 
     def skills(self) -> list[Skill]:
-        found = [s for seg in (GLOBAL, self.project) for s in self.index.all(seg) if self.allow(s, seg)]
-        return sorted(found, key=lambda s: s.invoke)
+        return self.index.visible(self.allow, self.project)
 
 
 def allowed_skills(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> list[Skill]:
@@ -98,7 +93,7 @@ def search(
     claude_home: Path, cwd: Path, data: Path, cfg: Config, queries: list[str], limit: int = 30
 ) -> list[Hit]:
     view = _View(claude_home, cwd, data, cfg)
-    return view.index.search(queries, limit, view.allow)
+    return view.index.search(queries, limit, view.allow, view.project)
 
 
 def index_counts(claude_home: Path, cwd: Path, data: Path, cfg: Config) -> tuple[int, int, int]:
