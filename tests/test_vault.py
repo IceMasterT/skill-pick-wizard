@@ -36,3 +36,16 @@ def test_skills_without_tool_tags_or_unreadable_omitted(tmp_path):
 def test_missing_vault_returns_empty(tmp_path):
     assert vault.area_tags(None) == {}
     assert vault.area_tags(tmp_path / "nope") == {}
+
+
+def test_skill_files_lists_vault_skill_mds_skipping_tests(tmp_path):
+    v = tmp_path / "vault"
+    write(v / "a" / "SKILL.md", "---\ntags: [tool/a]\n---\n")
+    write(v / "pack" / "b" / "SKILL.md", "---\ntags: [x]\n---\n")
+    write(v / "pack" / "tests" / "c" / "SKILL.md", "---\ntags: [tool/c]\n---\n")
+    assert vault.skill_files(v) == [v / "a" / "SKILL.md", v / "pack" / "b" / "SKILL.md"]
+
+
+def test_skill_files_missing_vault_is_empty(tmp_path):
+    assert vault.skill_files(None) == []
+    assert vault.skill_files(tmp_path / "nope") == []
