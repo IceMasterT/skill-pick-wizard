@@ -5,6 +5,7 @@ function tolerates missing, corrupt, wrong-typed or partially valid content and
 never raises.
 """
 import json
+import math
 import os
 import re
 import tempfile
@@ -44,7 +45,7 @@ class SessionState:
 def atomic_write_json(path: Path, obj) -> None:
     """Write obj as JSON so a reader sees either the old file or the new one, never a partial."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
     )
@@ -54,12 +55,27 @@ def atomic_write_json(path: Path, obj) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp.name, path)
+        _fsync_dir(path.parent)
     except BaseException:
         try:
             os.unlink(tmp.name)
         except OSError:
             pass
         raise
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Best effort: make the rename itself durable. Failure never undoes the write."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _read_json(path: Path):
@@ -81,7 +97,7 @@ def load_config(data: Path) -> Config:
     for key in ("deep_scan_model", "vault_path"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
-            setattr(cfg, key, value)
+            setattr(cfg, key, value.strip())
     return cfg
 
 
@@ -114,22 +130,30 @@ def _parse_stages(raw) -> list[Stage]:
     return stages
 
 
+def _finite_float(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    try:
+        result = float(value)
+    except OverflowError:
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
 def load_session(data: Path, sid: str) -> SessionState | None:
     if not valid_session_id(sid):
         return None
     raw = _read_json(Path(data) / "sessions" / f"{sid}.json")
     if not isinstance(raw, dict) or raw.get("status") not in STATUSES:
         return None
-    updated = raw.get("updated")
+    updated = _finite_float(raw.get("updated"))
     return SessionState(
         status=raw["status"],
         job=raw["job"] if isinstance(raw.get("job"), str) else "",
         stages=_parse_stages(raw.get("stages")),
-        mode=raw["mode"] if isinstance(raw.get("mode"), str) else "",
+        mode=raw["mode"] if raw.get("mode") in MODES else "",
         deep_scan=raw["deep_scan"] if isinstance(raw.get("deep_scan"), bool) else False,
-        updated=float(updated)
-        if isinstance(updated, (int, float)) and not isinstance(updated, bool)
-        else 0.0,
+        updated=updated,
     )
 
 
@@ -169,15 +193,30 @@ def clear_session(data: Path, sid: str) -> None:
 
 
 def cleanup_sessions(data: Path, max_age_days: int = 14, now: float | None = None) -> int:
-    """Remove session files older than max_age_days; returns how many were removed."""
+    """Remove stale session files and orphaned temp files; returns how many were removed.
+
+    Session files (<valid sid>.json in sessions/) and *.tmp files (left behind by a
+    killed writer, in sessions/ and the data dir) older than max_age_days are removed.
+    Only files whose mtime is past the cutoff are touched, so a live writer's fresh
+    temp file or session is never removed. A save landing between the stat and the
+    unlink of an already stale file would be lost; that race is accepted because the
+    state is disposable and the window is microseconds.
+    """
     now = time.time() if now is None else now
     cutoff = now - max_age_days * 86400
+    data = Path(data)
+    candidates = [
+        f for f in (data / "sessions").glob("*.json") if valid_session_id(f.stem)
+    ]
+    candidates += (data / "sessions").glob("*.tmp")
+    candidates += data.glob("*.tmp")
     removed = 0
-    for f in (Path(data) / "sessions").glob("*.json"):
+    for f in candidates:
         try:
-            if f.stat().st_mtime < cutoff:
-                f.unlink()
-                removed += 1
+            if f.stat().st_mtime >= cutoff:
+                continue
+            f.unlink()
+            removed += 1
         except OSError:
             continue
     return removed
