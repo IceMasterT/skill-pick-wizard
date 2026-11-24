@@ -336,6 +336,18 @@ def test_skills_claude_may_not_invoke_are_left_out(env):
     assert not (env.data / "errors.log").exists()  # a deliberate setting, not an error
 
 
+def test_huge_numeric_invocation_flags_never_crash_discovery(env):
+    """Numbers too big for float() or int()'s digit limit are compared exactly, never converted."""
+    root = env.claude_home / "skills"
+    hidden = {"h1": "0" * 5000 + "1", "h2": "1." + "0" * 5000, "h3": "0x" + "0" * 5000 + "1",
+              "h4": "1" + "0" * 5000 + "e-5000"}
+    shown = {"s1": "1" + "0" * 400, "s2": "9" * 5000, "s3": "0x" + "f" * 5000, "s4": "1e999",
+             "s5": "1" * 5000 + ".0", "s6": "1e-99999999999999999999"}
+    for name, value in {**hidden, **shown}.items():
+        make_skill(root, name, f"description: d\ndisable-model-invocation: {value}")
+    assert [s.invoke for s in sources.user_skills(env.claude_home)] == sorted(shown)
+
+
 # Plugins from a "directory" marketplace: Claude Code loads them from the marketplace folder,
 # not from the installPath cache copy (which goes stale when the folder is edited).
 def _known(env, marketplaces: dict) -> None:

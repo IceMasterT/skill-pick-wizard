@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from .frontmatter import is_utf8_text, parse_frontmatter, tag_list
@@ -97,14 +98,20 @@ _YAML_INT = re.compile(r"[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+")
 _YAML_FLOAT = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
 
 
-def _yaml_number(text: str) -> float | None:
-    if _YAML_INT.fullmatch(text):
-        if text.startswith(("0o", "0x")):
-            return float(int(text[2:], 8 if text[1] == "o" else 16))
-        return float(int(text))
-    if _YAML_FLOAT.fullmatch(text):
-        return float(text)
-    return None
+def _yaml_number_is_one(text: str) -> bool:
+    """True when `text` is a YAML number whose value is exactly 1.
+
+    Compared exactly, never converted with int() or float(): a hostile SKILL.md can hold a number
+    too big for float() (OverflowError) or past int()'s digit limit (ValueError).
+    """
+    if _YAML_INT.fullmatch(text) and text.startswith(("0o", "0x")):
+        return text[2:].lstrip("0") == "1"
+    if _YAML_INT.fullmatch(text) or _YAML_FLOAT.fullmatch(text):
+        try:
+            return Decimal(text) == 1  # exact at any size; exponent is stored, not expanded
+        except (ArithmeticError, ValueError):
+            return False  # exponent beyond Decimal's range: the value cannot be 1
+    return False
 
 
 def model_invocation_disabled(value) -> bool:
@@ -112,7 +119,7 @@ def model_invocation_disabled(value) -> bool:
     if not isinstance(value, str):
         return False
     text = value.strip()
-    return text.lower() in _TRUE_FLAGS or _yaml_number(text) == 1
+    return text.lower() in _TRUE_FLAGS or _yaml_number_is_one(text)
 
 
 def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
