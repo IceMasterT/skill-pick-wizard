@@ -24,6 +24,7 @@ SKILLS = [
     _skill("test-driven-development", "Write tests first, red green refactor", tags=("tool/testing",)),
     _skill("brainstorming", "Explore intent and design before building"),
     _skill("sp:brainstorming", "Explore intent and design before building", plugin="sp@m"),
+    _skill("zz-distractor", "Mentions brainstorming only in the description of this unrelated skill"),
     _skill("stripe-payments", "Stripe checkout and billing integration"),
 ]
 
@@ -40,8 +41,8 @@ def invokes(hits):
 
 
 def test_name_weighted_over_description(idx):
-    assert set(invokes(idx.search(["brainstorming"]))[:2]) == {"brainstorming", "sp:brainstorming"}
-    hits = invokes(idx.search(["brainstorming design"]))
+    hits = invokes(idx.search(["brainstorming"]))
+    assert "zz-distractor" in hits
     assert set(hits[:2]) == {"brainstorming", "sp:brainstorming"}
 
 
@@ -77,7 +78,8 @@ def test_limit_respected(idx):
 
 def test_allow_filter(idx):
     hits = idx.search(["brainstorming"], allow=lambda s: s.plugin_id != "sp@m")
-    assert invokes(hits) == ["brainstorming"]
+    assert invokes(hits) == ["brainstorming", "zz-distractor"]
+    assert "sp:brainstorming" not in invokes(hits)
 
 
 @pytest.mark.parametrize(
@@ -95,8 +97,8 @@ def test_special_char_queries_still_match(idx):
 
 
 def test_rebuild_replaces_contents_and_fingerprint(idx):
-    assert idx.count() == 5 and idx.stored_fingerprint() == "fp1"
-    idx.rebuild([SKILLS[4]], "fp2")
+    assert idx.count() == len(SKILLS) and idx.stored_fingerprint() == "fp1"
+    idx.rebuild([SKILLS[-1]], "fp2")
     assert idx.count() == 1
     assert idx.stored_fingerprint() == "fp2"
     assert idx.search(["brainstorming"]) == []
@@ -149,3 +151,60 @@ def test_search_is_fast_on_large_index(tmp_path):
     for q in ("topic7 things", "description", "skill-5"):
         i.search([q, "and"])
     assert time.perf_counter() - t < 0.5
+
+
+def test_failed_rebuild_keeps_old_contents(idx):
+    bad = [_skill("good", "fine"), _skill("bad", "boom", tags=(object(),))]
+    with pytest.raises(TypeError):
+        idx.rebuild(bad, "fp-bad")
+    assert idx.count() == len(SKILLS)
+    assert idx.stored_fingerprint() == "fp1"
+    assert "stripe-payments" in invokes(idx.search(["stripe"]))
+    assert idx.get("good") is None
+
+
+def test_search_correct_after_rebuild_on_other_connection(idx):
+    other = SkillIndex(idx.db_path)
+    assert invokes(idx.search(["stripe"])) == ["stripe-payments"]
+    other.rebuild([_skill("fresh-one", "Stripe refunds and disputes")], "fp9")
+    assert invokes(idx.search(["stripe"])) == ["fresh-one"]
+    assert idx.stored_fingerprint() == "fp9"
+    assert idx.get("stripe-payments") is None
+
+
+def test_wal_mode_enabled(idx):
+    import sqlite3
+    with sqlite3.connect(idx.db_path) as c:
+        assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_fts_is_self_contained(idx):
+    import sqlite3
+    with sqlite3.connect(idx.db_path) as c:
+        c.execute("INSERT INTO fts(fts) VALUES('rebuild')")
+        c.execute("SELECT highlight(fts, 2, '[', ']') FROM fts WHERE fts MATCH 'stripe'").fetchall()
+
+
+def test_duplicate_queries_not_double_counted(idx):
+    one = idx.search(["stripe"])[0]
+    two = idx.search(["stripe", "stripe"])[0]
+    assert one.score == two.score and two.queries == ("stripe",)
+
+
+def test_allow_applied_before_ranking_and_limit(tmp_path):
+    many = [_skill(f"s{i:03d}", "common words here") for i in range(150)]
+    i = SkillIndex(tmp_path / "m.db")
+    i.rebuild(many, "f")
+    hits = i.search(["common"], limit=30, allow=lambda s: s.invoke >= "s140" or s.invoke == "s000")
+    assert len(hits) == 11
+    assert hits[0].score == pytest.approx(1 / 60)
+
+
+def test_unicode_words():
+    assert build_fts_query("Café_au LAIT") == '"café" OR "au" OR "lait"'
+
+
+def test_unicode_search(tmp_path):
+    i = SkillIndex(tmp_path / "u.db")
+    i.rebuild([_skill("cafe-menu", "Plan a café menu")], "f")
+    assert invokes(i.search(["café"])) == ["cafe-menu"]

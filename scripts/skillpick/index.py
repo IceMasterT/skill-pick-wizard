@@ -10,9 +10,8 @@ from pathlib import Path
 
 from .sources import Skill
 
-_WORD = re.compile(r"[A-Za-z0-9]+")
+_WORD = re.compile(r"[^\W_]+")
 _RRF_K = 60
-_PER_QUERY_LIMIT = 100
 _COLUMNS = "invoke, name, description, source, plugin_id, path, tags_json"
 
 _SCHEMA = """
@@ -29,7 +28,6 @@ CREATE TABLE IF NOT EXISTS skills(
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     invoke, name, description, tags,
-    content='skills', content_rowid='rowid',
     tokenize='porter unicode61'
 );
 """
@@ -60,7 +58,7 @@ def fingerprint(files: list[Path]) -> str:
 def build_fts_query(text: str) -> str | None:
     """Turn free text into a safe FTS5 query: every word quoted, joined with OR.
 
-    Only [A-Za-z0-9]+ words survive, so no FTS5 syntax can leak through, and quoting
+    Only runs of Unicode letters/digits survive, so no FTS5 syntax can leak through, and quoting
     makes bare operators such as AND/OR/NOT/NEAR plain phrases.
     """
     words = [w.lower() for w in _WORD.findall(text)]
@@ -73,7 +71,7 @@ def _invoke_text(invoke: str) -> str:
     return re.sub(r"[-:_]+", " ", invoke)
 
 
-def _row_to_skill(row) -> Skill:
+def _row_to_skill(row: tuple) -> Skill:
     invoke, name, description, source, plugin_id, path, tags_json = row
     return Skill(invoke, name, description, source, plugin_id, path, tuple(json.loads(tags_json)))
 
@@ -87,6 +85,8 @@ class SkillIndex:
         # isolation_level=None: transactions are managed explicitly.
         conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None)
         try:
+            # WAL lets readers and the rebuild writer proceed without blocking each other.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
         except BaseException:
             conn.close()
@@ -127,7 +127,10 @@ class SkillIndex:
                 conn.execute("INSERT INTO meta(k, v) VALUES ('fingerprint', ?)", (fp,))
                 conn.execute("COMMIT")
             except BaseException:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass  # never mask the original exception
                 raise
 
     def count(self) -> int:
@@ -152,34 +155,39 @@ class SkillIndex:
         limit: int = 30,
         allow: Callable[[Skill], bool] = lambda s: True,
     ) -> list[Hit]:
-        scores: dict[int, float] = {}
-        matched: dict[int, list[str]] = {}
+        """Reciprocal-rank-fuse the per-query FTS results.
+
+        `allow` is applied to each query's full match list before that query's ranks
+        are assigned, so restrictive filters still fill `limit`. All queries run inside
+        one read transaction, so a concurrent rebuild can never produce a mixed result.
+        """
+        scores: dict[str, float] = {}
+        matched: dict[str, list[str]] = {}
+        found: dict[str, Skill] = {}
         with closing(self._connect()) as conn:
-            for query in queries:
-                fts_query = build_fts_query(query)
-                if fts_query is None:
-                    continue
-                rows = conn.execute(
-                    "SELECT rowid FROM fts WHERE fts MATCH ? "
-                    "ORDER BY bm25(fts, 10.0, 8.0, 1.0, 3.0) LIMIT ?",
-                    (fts_query, _PER_QUERY_LIMIT),
-                ).fetchall()
-                for rank, (rowid,) in enumerate(rows):
-                    scores[rowid] = scores.get(rowid, 0.0) + 1.0 / (_RRF_K + rank)
-                    matched.setdefault(rowid, []).append(query)
-            if not scores:
-                return []
-            skills: dict[int, Skill] = {}
-            for rowid in scores:
-                row = conn.execute(
-                    f"SELECT {_COLUMNS} FROM skills WHERE rowid = ?", (rowid,)
-                ).fetchone()
-                if row:
-                    skills[rowid] = _row_to_skill(row)
-        hits = [
-            Hit(skills[r], scores[r], tuple(matched[r]))
-            for r in scores
-            if r in skills and allow(skills[r])
-        ]
+            conn.execute("BEGIN")
+            try:
+                for query in dict.fromkeys(queries):
+                    fts_query = build_fts_query(query)
+                    if fts_query is None:
+                        continue
+                    rows = conn.execute(
+                        "SELECT " + ", ".join(f"s.{c.strip()}" for c in _COLUMNS.split(","))
+                        + " FROM fts JOIN skills s ON s.rowid = fts.rowid WHERE fts MATCH ? "
+                        "ORDER BY bm25(fts, 10.0, 8.0, 1.0, 3.0), fts.rowid",
+                        (fts_query,),
+                    ).fetchall()
+                    rank = 0
+                    for row in rows:
+                        skill = _row_to_skill(row)
+                        if not allow(skill):
+                            continue
+                        found[skill.invoke] = skill
+                        scores[skill.invoke] = scores.get(skill.invoke, 0.0) + 1.0 / (_RRF_K + rank)
+                        matched.setdefault(skill.invoke, []).append(query)
+                        rank += 1
+            finally:
+                conn.execute("COMMIT")
+        hits = [Hit(found[k], scores[k], tuple(matched[k])) for k in scores]
         hits.sort(key=lambda h: (-h.score, h.skill.invoke))
         return hits[:limit]
