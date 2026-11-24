@@ -4,6 +4,8 @@ The hook calls load_config and load_session on every prompt, so every load_*
 function tolerates missing, corrupt, wrong-typed or partially valid content and
 never raises.
 """
+from __future__ import annotations
+
 import json
 import math
 import os
@@ -17,6 +19,7 @@ from pathlib import Path
 MODES = ("approve", "show", "silent")
 STATUSES = ("planned", "skipped")
 _SID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_MODEL_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 
 
 @dataclass
@@ -100,10 +103,12 @@ def load_config(data: Path) -> Config:
         cfg.mode = raw["mode"]
     if isinstance(raw.get("deep_scan"), bool):
         cfg.deep_scan = raw["deep_scan"]
-    for key in ("deep_scan_model", "vault_path"):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            setattr(cfg, key, value.strip())
+    model = raw.get("deep_scan_model")
+    if isinstance(model, str) and _MODEL_RE.fullmatch(model.strip()):
+        cfg.deep_scan_model = model.strip()
+    vault = raw.get("vault_path")
+    if isinstance(vault, str) and vault.strip():
+        cfg.vault_path = vault.strip()
     return cfg
 
 

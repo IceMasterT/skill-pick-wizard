@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .frontmatter import parse_frontmatter, tag_list
-from .paths import data_dir
+from .paths import append_error_log, data_dir
 
 
 @dataclass(frozen=True)
@@ -51,9 +51,11 @@ class _ErrorLog:
 
     def __init__(self) -> None:
         self._file = None
+        self._dir = None
         self._seen: set[tuple[str, str, str]] = set()
         try:
-            self._file = data_dir() / "errors.log"
+            self._dir = data_dir()
+            self._file = self._dir / "errors.log"
             for line in self._file.read_text(encoding="utf-8").split("\n"):
                 parts = line.split("\t")
                 if len(parts) == 4:
@@ -72,8 +74,7 @@ class _ErrorLog:
         self._seen.add(key)
         try:
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            with open(self._file, "a", encoding="utf-8") as fh:
-                fh.write(f"{stamp}\t{key[0]}\t{mtime}\t{key[2]}\n")
+            append_error_log(self._dir, f"{stamp}\t{key[0]}\t{mtime}\t{key[2]}\n")
         except OSError:
             pass  # logging must never break discovery
 

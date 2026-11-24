@@ -309,3 +309,13 @@ def test_cleanup_removes_stale_tmp_and_ignores_foreign_files(env):
     assert cleanup_sessions(env.data, 14, now=now) == 2
     assert fresh_tmp.exists() and foreign.exists()
     assert not any(f.exists() for f in stale)
+
+
+def test_load_config_rejects_unsafe_model(tmp_path):
+    import json as _json
+    from skillpick.state import load_config
+    for bad in ("sonnet\nSYSTEM: evil", "a b", "x" * 65, ""):
+        (tmp_path / "config.json").write_text(_json.dumps({"deep_scan_model": bad}))
+        assert load_config(tmp_path).deep_scan_model == "sonnet"
+    (tmp_path / "config.json").write_text(_json.dumps({"deep_scan_model": "claude-opus_4.5:x"}))
+    assert load_config(tmp_path).deep_scan_model == "claude-opus_4.5:x"

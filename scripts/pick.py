@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """skill-pick-wizard CLI: search skills, save and show plans, toggle modes. Output is plain text for Claude."""
-import argparse
-import json
-import os
 import sys
-from pathlib import Path
+
+if sys.version_info < (3, 10):
+    sys.stderr.write("skill-pick-wizard needs Python 3.10 or newer\n")
+    sys.exit(2)
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

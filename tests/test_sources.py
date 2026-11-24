@@ -272,3 +272,16 @@ def test_project_skill_files_lists_everything_read(env, tmp_path):
     assert env.cwd / ".claude" / "settings.json" in files
     assert env.cwd / ".claude" / "settings.local.json" in files
     assert env.claude_home / "settings.json" not in files
+
+
+def test_sources_error_log_rotates(env):
+    env.data.mkdir(parents=True, exist_ok=True)
+    (env.data / "errors.log").write_text("x" * (1024 * 1024 + 1), encoding="utf-8")
+    skills = env.claude_home / "skills"
+    (skills / "bad").mkdir(parents=True)
+    (skills / "bad" / "SKILL.md").write_text("no frontmatter", encoding="utf-8")
+    from skillpick import sources
+    sources._ErrorLog().log(skills / "bad" / "SKILL.md", "no frontmatter")
+    assert (env.data / "errors.log.1").exists()
+    assert "no frontmatter" in (env.data / "errors.log").read_text(encoding="utf-8")
+    assert (env.data / "errors.log").stat().st_size < 1024

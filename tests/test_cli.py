@@ -181,3 +181,21 @@ def test_save_plan_rejects_empty_stage_or_skills(env, capsys):
                 '[{"stage": "x", "skills": []}]', '[{"stage": "x", "skills": [""]}]'):
         code, _, err = run(capsys, "save-plan", "--session", "s1", "--job", "j", "--plan", bad)
         assert code == 2 and err.startswith("invalid --plan") and err.count("\n") == 1
+
+
+def test_pick_rejects_old_python_before_importing_skillpick(tmp_path):
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    scripts = tmp_path / "s"
+    shutil.copytree(Path(__file__).resolve().parent.parent / "scripts", scripts,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (scripts / "skillpick" / "__init__.py").write_text("raise RuntimeError('imported')\n")
+    src = (scripts / "pick.py").read_text().replace("(3, 10)", "(99, 0)", 1)
+    (scripts / "pick.py").write_text(src)
+    r = subprocess.run([sys.executable, str(scripts / "pick.py"), "--help"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2
+    assert "skill-pick-wizard needs Python 3.10 or newer" in r.stderr
+    assert "imported" not in r.stderr
