@@ -12,6 +12,8 @@ from .sources import Skill
 
 _WORD = re.compile(r"[^\W_]+")
 _RRF_K = 60
+# Bump when the table layout changes; a mismatch drops and recreates the (cache-only) index.
+_SCHEMA_VERSION = 2
 _COLUMNS = "invoke, name, description, source, plugin_id, path, tags_json"
 
 _SCHEMA = """
@@ -87,11 +89,36 @@ class SkillIndex:
         try:
             # WAL lets readers and the rebuild writer proceed without blocking each other.
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(_SCHEMA)
+            self._ensure_schema(conn)
         except BaseException:
             conn.close()
             raise
         return conn
+
+    @staticmethod
+    def _create_schema(conn: sqlite3.Connection) -> None:
+        for statement in _SCHEMA.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        if conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION:
+            return
+        # Missing or stale layout: the index is a rebuildable cache, so start clean.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if conn.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+                for table in ("fts", "skills", "meta"):
+                    conn.execute(f"DROP TABLE IF EXISTS {table}")
+                self._create_schema(conn)
+                conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
 
     def stored_fingerprint(self) -> str | None:
         with closing(self._connect()) as conn:
@@ -106,9 +133,7 @@ class SkillIndex:
                 conn.execute("DROP TABLE IF EXISTS fts")
                 conn.execute("DROP TABLE IF EXISTS skills")
                 conn.execute("DROP TABLE IF EXISTS meta")
-                for statement in _SCHEMA.split(";"):
-                    if statement.strip():
-                        conn.execute(statement)
+                self._create_schema(conn)
                 seen: set[str] = set()
                 for s in skills:
                     if s.invoke in seen:
