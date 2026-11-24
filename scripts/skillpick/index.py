@@ -31,6 +31,9 @@ _INDEX_FILE = re.compile(r"skills(?:-v(\d+))?\.sqlite")
 _SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
 _COLUMNS = "invoke, name, description, source, plugin_id, path, tags_json"
 
+# The index's FTS5 tokenizer; distinct_terms() tokenizes query words with the very same one.
+_TOKENIZER = "porter unicode61"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS skills(
@@ -47,9 +50,9 @@ CREATE TABLE IF NOT EXISTS skills(
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     invoke, name, description, tags,
-    tokenize='porter unicode61'
+    tokenize='{tokenizer}'
 );
-"""
+""".format(tokenizer=_TOKENIZER)
 
 
 @dataclass(frozen=True)
@@ -100,9 +103,36 @@ def _quote(term: str) -> str:
     return f'"{term}"'
 
 
+def distinct_terms(terms: list[str]) -> list[str]:
+    """One term per distinct index token, in order: "tests" and "testing" are both the porter token
+    "test", so only the first is kept. Terms the tokenizer turns into no token are dropped.
+
+    The words are run through an in-memory FTS5 table with the index's own tokenizer and read back
+    with fts5vocab, so the result matches the index exactly (no separate stemmer).
+    """
+    if not terms:
+        return []
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute(f"CREATE VIRTUAL TABLE words USING fts5(word, tokenize='{_TOKENIZER}')")
+        conn.execute("CREATE VIRTUAL TABLE tokens USING fts5vocab(words, 'instance')")
+        conn.executemany("INSERT INTO words(rowid, word) VALUES (?, ?)", list(enumerate(terms)))
+        keys: dict[int, list[str]] = {}
+        for doc, token in conn.execute("SELECT doc, term FROM tokens ORDER BY doc, offset"):
+            keys.setdefault(doc, []).append(token)
+    seen: set[tuple[str, ...]] = set()
+    out = []
+    for i, term in enumerate(terms):
+        key = tuple(keys.get(i, ()))
+        if key and key not in seen:
+            seen.add(key)
+            out.append(term)
+    return out
+
+
 def build_fts_query(text: str) -> str | None:
-    """The OR of a query's terms (see query_terms) as a safe FTS5 query, or None when it has none."""
-    terms = query_terms(text)
+    """The OR of a query's distinct terms (see query_terms, distinct_terms) as a safe FTS5 query,
+    or None when it has none."""
+    terms = distinct_terms(query_terms(text))
     return " OR ".join(_quote(t) for t in terms) if terms else None
 
 
@@ -419,7 +449,8 @@ class SkillIndex:
     ) -> list[Hit]:
         """Fuse the per-query FTS results.
 
-        Per query: skills matching at least half of its terms (see query_terms, required_matches),
+        Per query: skills matching at least half of its distinct terms (see query_terms,
+        distinct_terms, required_matches),
         ranked by BM25, filtered by `allow(skill, segment)` and shadowing, then cut to the top
         `limit`, so restrictive filters still fill each list. A skill in another segment whose
         invoke is also allowed in `override_segment` is shadowed by it.
@@ -445,7 +476,7 @@ class SkillIndex:
             try:
                 shadowed = self._shadowed(conn, allow, override_segment)
                 for query in dict.fromkeys(queries):
-                    terms = query_terms(query)
+                    terms = distinct_terms(query_terms(query))
                     if not terms:
                         continue
                     for term in terms:

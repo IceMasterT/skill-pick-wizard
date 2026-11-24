@@ -322,8 +322,13 @@ def test_plugin_id_that_is_not_utf8_text_is_rejected(env, tmp_path):
 def test_skills_claude_may_not_invoke_are_left_out(env):
     """Claude Code hides a skill from the Skill tool when disable-model-invocation is true, yes, on or 1."""
     root = env.claude_home / "skills"
-    hidden = {"t1": "true", "t2": "True", "t3": "yes", "t4": '"on"', "t5": "1", "t6": " TRUE  # user only"}
-    shown = {"f1": "false", "f2": "no", "f3": "0", "f4": "maybe", "f5": "[true]"}
+    hidden = {"t1": "true", "t2": "True", "t3": "yes", "t4": '"on"', "t5": "1", "t6": " TRUE  # user only",
+              # YAML numbers whose value is 1: Claude Code turns the number into the string "1"
+              "n1": "1.0", "n2": "0x1", "n3": "+1", "n4": "1e0", "n5": "0o1", "n6": "10e-1", "n7": "001"}
+    shown = {"f1": "false", "f2": "no", "f3": "0", "f4": "maybe", "f5": "[true]", "f6": "off",
+             "f7": "0.0", "f8": "0x0", "f9": "-0",
+             # other numbers become "2", "-1", "1.5": not one of Claude Code's true strings
+             "f10": "2", "f11": "-1", "f12": "1.5", "f13": "0x10"}
     for name, value in {**hidden, **shown}.items():
         make_skill(root, name, f"description: d\ndisable-model-invocation: {value}")
     make_skill(root, "plain", "description: d")

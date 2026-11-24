@@ -176,6 +176,8 @@ def test_every_command_line_parses_with_the_real_parser():
                 values = [""] + re.findall(r"\w[\w-]*", hint)
             else:
                 values = [""]
+            bare = re.sub(r"<[^<>]+>", "x", command)  # placeholders such as '<query 1>' are not redirects
+            assert not re.search(r"[|<>&;]", bare), f"{path.name}: piped or redirected pick.py line: {command}"
             for value in values:
                 argv = _fill(command, value)
                 args = _parse(argv)
@@ -473,3 +475,26 @@ def test_show_and_approve_modes_must_write_the_list_as_text():
     assert "show the list" in show and "required" in show
     intro = _section(_read(SKILL), "Follow the steps in order.", "## 0.")
     assert "The list is not commentary" in intro
+
+
+def test_pick_output_is_never_piped_filtered_or_redirected():
+    """Live run: Claude piped search through `2>&1 | grep`, dropping the description lines step 4 judges by."""
+    text = _read(SKILL)
+    for start, end in (("## 2. Search", "## 3."), ("## 3. Deep scan", "## 4.")):
+        section = _section(text, start, end)
+        assert "Run the command exactly as shown and read all of its output." in section, start
+        assert "Never pipe, filter, truncate or redirect it" in section, start
+    rule = _section(text, "## 2. Search", "## 3.")
+    for example in ("`| grep`", "`| head`", "`2>&1`"):
+        assert example in rule
+    assert "step 4 judges each candidate by its description line" in rule
+    assert "error line" in rule
+
+
+def test_choose_step_fills_stages_without_padding():
+    item = next(l for l in _section(_read(SKILL), "## 4. Choose", "## 5.").splitlines() if l.startswith("1. "))
+    assert "every candidate that genuinely fits a stage" in item
+    assert "aiming for 3 to 8 in total" in item
+    assert "below 3 only when no other candidate genuinely fits any stage" in item
+    assert "never pad" in item
+    assert "at most 4 per stage" in item and "at most 8" in item

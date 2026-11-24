@@ -526,3 +526,16 @@ def test_visible_reads_only_the_given_segments_and_decodes_each_row_once(tmp_pat
     got = i.visible(override_segment="project:a", segments=("global", "project:a"))
     assert [(s.invoke, s.description) for s in got] == [("dup", "a"), ("g-only", "g")]
     assert sorted(decoded) == ["dup", "dup", "g-only"]
+
+
+
+def test_terms_that_share_a_token_count_once_for_the_half_terms_floor(tmp_path):
+    """The floor counts distinct index tokens: "tests" and "testing" are both the porter token "test"."""
+    from skillpick.index import distinct_terms
+    assert distinct_terms(["tests", "testing", "zzqq"]) == ["tests", "zzqq"]
+    assert distinct_terms(["Café", "cafe", "run", "running"]) == ["Café", "run"]
+    i = SkillIndex(tmp_path / "tok.db")
+    i.replace_segment("global", [_skill("only-test", "test")], "f")
+    assert invokes(i.search(["tests testing zzqq"])) == ["only-test"]  # 1 of 2 distinct tokens: half
+    assert i.search(["test zzqq kkww"]) == []  # 1 of 3: below half
+    assert i.search(["tests testing zzqq kkww"]) == []  # same 3 tokens: must not pass by double counting

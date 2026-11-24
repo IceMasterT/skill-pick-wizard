@@ -261,3 +261,17 @@ def test_long_descriptions_are_capped_so_lines_fit_a_read(tmp_path):
     assert len(desc) == MAX_DESCRIPTION and desc.endswith("...") and desc.startswith("word word")
     assert b == f"- `b` []: {exact}"  # at the cap: untouched
     assert len(a) < 2000  # the Read tool truncates longer lines
+
+
+
+def test_long_tags_are_capped_so_lines_fit_a_read(tmp_path):
+    from skillpick.catalog import MAX_TAGS
+    tags = [f"tool/area-{n:04d}-with-a-long-name" for n in range(60)]  # > 1000 characters
+    assert len(", ".join(tags)) > 1000
+    [path] = write_catalog([sk("many-tags", "word " * 1000, tags)], tmp_path / "c", 1)
+    [line] = path.read_text().splitlines()
+    shown = line.split("[", 1)[1].split("]: ", 1)[0]
+    assert len(shown) <= MAX_TAGS and shown.endswith("...") and shown.startswith("tool/area-0000")
+    assert len(line) < 1900
+    [short] = write_catalog([sk("few", "d", ["tool/x", "tool/y"])], tmp_path / "d", 1)
+    assert short.read_text() == "- `few` [tool/x, tool/y]: d\n"

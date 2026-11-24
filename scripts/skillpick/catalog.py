@@ -6,9 +6,15 @@ from .sources import Skill
 from .state import atomic_write_text
 
 
-# The Read tool cuts lines longer than 2000 characters; a capped description keeps every catalog
-# line whole, so a helper agent always sees the invoke and the start of what the skill does.
+# The Read tool cuts lines longer than 2000 characters; capped tags and description keep every
+# catalog line whole (with the invoke, a file name of at most 255 bytes, well under 2000), so a
+# helper agent always sees the invoke and the start of what the skill does.
 MAX_DESCRIPTION = 1500
+MAX_TAGS = 300
+
+
+def _capped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
 def one_line(text: str) -> str:
@@ -41,10 +47,8 @@ def copyable(invoke: str) -> bool:
 def format_line(skill: Skill) -> str:
     if not copyable(skill.invoke):
         raise ValueError(f"invoke cannot be written to a catalog line: {skill.invoke!r}")
-    tags = one_line(", ".join(skill.tags))
-    description = one_line(skill.description)
-    if len(description) > MAX_DESCRIPTION:
-        description = description[: MAX_DESCRIPTION - 3].rstrip() + "..."
+    tags = _capped(one_line(", ".join(skill.tags)), MAX_TAGS)
+    description = _capped(one_line(skill.description), MAX_DESCRIPTION)
     return f"- `{skill.invoke}` [{tags}]: {description}"
 
 
