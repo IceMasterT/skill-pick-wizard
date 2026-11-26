@@ -38,6 +38,8 @@ If you set `SKILL_PICK_WIZARD_HOME`, use that folder in the `Read` rule instead.
 | `show` | Shows the picked skills and starts without asking |
 | `silent` | Picks and starts without showing anything |
 
+Once a plan is saved in approve or show mode, the plugin shows the saved list as a notice (one skill per line, under its stage, with why it fits). Silent mode shows nothing.
+
 `/skill-mode` shows the current mode; `/skill-mode show` (or `approve`, `silent`) changes it.
 
 ## Commands
