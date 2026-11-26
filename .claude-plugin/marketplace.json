@@ -1,0 +1,7 @@
+{
+  "name": "skill-pick-wizard",
+  "owner": {"name": "local"},
+  "plugins": [
+    {"name": "skill-pick-wizard", "source": "./", "description": "Recommends the best installed skills for each job and keeps them in use for the whole job."}
+  ]
+}

@@ -1,0 +1,370 @@
+"""Discovery of user, project and plugin skills, and enabled-plugin resolution."""
+import json
+import os
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+from .frontmatter import is_utf8_text, parse_frontmatter, tag_list
+from .paths import append_error_log, data_dir
+
+
+@dataclass(frozen=True)
+class Skill:
+    invoke: str
+    name: str
+    description: str
+    source: str  # "user" | "project" | "plugin"
+    plugin_id: str | None
+    path: str
+    tags: tuple[str, ...] = ()
+
+
+_ESCAPES = {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
+
+
+def _escape(ch: str) -> str:
+    if ch in _ESCAPES:
+        return _ESCAPES[ch]
+    if "\ud800" <= ch <= "\udfff":  # lone surrogate (e.g. an undecodable file name): not UTF-8
+        return f"\\u{ord(ch):04x}"
+    return ch
+
+
+def _encode(field: str) -> str:
+    """Escape backslash, tab, newline, CR and lone surrogates, so a field never breaks the
+    tab/newline line format and always writes as UTF-8."""
+    return "".join(_escape(ch) for ch in field)
+
+
+def _timestamp(value) -> float:
+    """Seconds since the epoch for an ISO-8601 string; unparseable values sort oldest."""
+    if not isinstance(value, str):
+        return float("-inf")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+class _ErrorLog:
+    """Append-only errors.log; one line per (path, mtime_ns, reason), read once per discovery run.
+
+    Fields are backslash-escaped on write (see _encode); keys are compared in encoded form, which is
+    equivalent to comparing decoded values because the encoding is injective.
+    """
+
+    def __init__(self) -> None:
+        self._file = None
+        self._dir = None
+        self._seen: set[tuple[str, str, str]] = set()
+        try:
+            self._dir = data_dir()
+            self._file = self._dir / "errors.log"
+            for line in self._file.read_text(encoding="utf-8").split("\n"):
+                parts = line.split("\t")
+                if len(parts) == 4:
+                    self._seen.add((parts[1], parts[2], parts[3]))
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    def log(self, path: Path, reason: str) -> None:
+        try:
+            mtime = str(path.stat().st_mtime_ns)
+        except OSError:
+            mtime = "missing"
+        key = (_encode(str(path)), mtime, _encode(reason))
+        if self._file is None or key in self._seen:
+            return
+        self._seen.add(key)
+        try:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            append_error_log(self._dir, f"{stamp}\t{key[0]}\t{mtime}\t{key[2]}\n")
+        except OSError:
+            pass  # logging must never break discovery
+
+
+# Claude Code reads a frontmatter flag as true when it is YAML true or when String(value), lower-cased
+# and trimmed, is one of these. A YAML number therefore counts only when its value is 1 (String(1.0)
+# and String(0x1) are both "1"; String(2) is "2").
+_TRUE_FLAGS = {"1", "true", "yes", "on"}
+# YAML 1.2 core schema numbers (decimal, octal 0o, hex 0x, floats); .inf/.nan can never equal 1.
+_YAML_INT = re.compile(r"[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+")
+_YAML_FLOAT = re.compile(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?")
+
+
+def _yaml_number_is_one(text: str) -> bool:
+    """True when `text` is a YAML number whose value is exactly 1.
+
+    Compared exactly, never converted with int() or float(): a hostile SKILL.md can hold a number
+    too big for float() (OverflowError) or past int()'s digit limit (ValueError).
+    """
+    if _YAML_INT.fullmatch(text) and text.startswith(("0o", "0x")):
+        return text[2:].lstrip("0") == "1"
+    if _YAML_INT.fullmatch(text) or _YAML_FLOAT.fullmatch(text):
+        try:
+            return Decimal(text) == 1  # exact at any size; exponent is stored, not expanded
+        except (ArithmeticError, ValueError):
+            return False  # exponent beyond Decimal's range: the value cannot be 1
+    return False
+
+
+def model_invocation_disabled(value) -> bool:
+    """True when a `disable-model-invocation` value makes Claude Code refuse the skill in the Skill tool."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return text.lower() in _TRUE_FLAGS or _yaml_number_is_one(text)
+
+
+def read_skill(skill_md: Path, invoke: str, source: str, plugin_id: str | None,
+               errors: _ErrorLog | None = None) -> Skill | None:
+    errors = errors or _ErrorLog()
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.log(skill_md, f"unreadable: {type(exc).__name__}")
+        return None
+    fm = parse_frontmatter(text)
+    if not fm:
+        errors.log(skill_md, "no frontmatter")
+        return None
+    if model_invocation_disabled(fm.get("disable-model-invocation")):
+        return None  # Claude Code keeps it out of the Skill tool; only the user can run it
+    description = fm.get("description")
+    if description is not None and not isinstance(description, str):
+        errors.log(skill_md, "description is not a string")
+        return None
+    if description is None or not description.strip():
+        errors.log(skill_md, "empty description")
+        return None
+    name = fm.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = skill_md.parent.name
+    skill = Skill(
+        invoke=invoke,
+        name=name.strip(),
+        description=description.strip(),
+        source=source,
+        plugin_id=plugin_id,
+        path=os.path.abspath(skill_md),
+        tags=tag_list(fm.get("tags")),
+    )
+    bad = _non_utf8_field(skill)
+    if bad:
+        # The index (SQLite) and Claude only take real text; one such skill must not break the rest.
+        errors.log(skill_md, f"not valid UTF-8 text: {bad}")
+        return None
+    return skill
+
+
+def _non_utf8_field(skill: Skill) -> str | None:
+    """The name of the first field that is not UTF-8 text, or None."""
+    fields = [("invoke", skill.invoke), ("name", skill.name), ("description", skill.description),
+              ("plugin", skill.plugin_id or ""), ("path", skill.path)]
+    fields += [("tags", tag) for tag in skill.tags]
+    return next((label for label, value in fields if not is_utf8_text(value)), None)
+
+
+def _skill_mds(skills_root: Path, errors: _ErrorLog | None = None) -> list[Path]:
+    """SKILL.md files directly under each child of skills_root (symlinks followed).
+
+    Dangling symlinks (a skill directory or its SKILL.md) are skipped, and logged when `errors` is given.
+    """
+    try:
+        children = sorted(skills_root.iterdir())
+    except OSError:
+        return []
+    found = []
+    for child in children:
+        if child.is_symlink() and not child.exists():
+            if errors:
+                errors.log(child, "broken skill directory symlink")
+            continue
+        md = child / "SKILL.md"
+        if md.is_symlink() and not md.exists():
+            if errors:
+                errors.log(md, "broken SKILL.md symlink")
+            continue
+        if md.is_file():
+            found.append(md)
+    return found
+
+
+def _read_dir(skills_root: Path, source: str, prefix: str = "", plugin_id: str | None = None,
+              errors: _ErrorLog | None = None) -> list[Skill]:
+    errors = errors or _ErrorLog()
+    skills = []
+    for md in _skill_mds(skills_root, errors):
+        skill = read_skill(md, prefix + md.parent.name, source, plugin_id, errors)
+        if skill:
+            skills.append(skill)
+    return skills
+
+
+def user_skills(claude_home: Path) -> list[Skill]:
+    return _read_dir(claude_home / "skills", "user")
+
+
+def project_skills(cwd: Path) -> list[Skill]:
+    return _read_dir(cwd / ".claude" / "skills", "project")
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _directory_source_root(claude_home: Path, plugin_id: str, known: dict, errors: _ErrorLog) -> Path | None:
+    """The folder Claude Code loads a plugin from when its marketplace is a local directory.
+
+    For a "directory" marketplace (known_marketplaces.json `source.source == "directory"`) that is
+    `installLocation` joined with the plugin's relative `source` in that marketplace's
+    .claude-plugin/marketplace.json; the installPath cache copy goes stale when the folder is
+    edited. None means "use installPath": always for other marketplace types, and, logged once,
+    whenever the directory source cannot be resolved to a folder inside installLocation.
+    """
+    known_file = claude_home / "plugins" / "known_marketplaces.json"
+    name, _, marketplace = plugin_id.partition("@")
+
+    def fallback(path: Path, why: str) -> None:
+        errors.log(path, f"plugin {plugin_id}: {why}; falling back to installPath")
+
+    entry = known.get(marketplace) if marketplace else None
+    if not isinstance(entry, dict) or not isinstance(entry.get("source"), dict):
+        fallback(known_file, "no marketplace entry in known_marketplaces.json")
+        return None
+    if entry["source"].get("source") != "directory":
+        return None
+    location = entry.get("installLocation")
+    if not isinstance(location, str) or not location:
+        fallback(known_file, "directory marketplace has no installLocation")
+        return None
+    manifest = Path(location) / ".claude-plugin" / "marketplace.json"
+    listed = _load_json(manifest).get("plugins")
+    match = next((p for p in listed if isinstance(p, dict) and p.get("name") == name), None) \
+        if isinstance(listed, list) else None
+    if match is None:
+        fallback(manifest, "not listed in marketplace.json")
+        return None
+    source = match.get("source")
+    if not isinstance(source, str) or not source or Path(source).is_absolute():
+        fallback(manifest, "source is not a relative path")
+        return None
+    try:
+        base = Path(location).resolve(strict=True)
+        root = (base / source).resolve(strict=True)
+    except (OSError, RuntimeError):
+        fallback(manifest, f"source {source!r} does not exist")
+        return None
+    if not root.is_dir() or not root.is_relative_to(base):
+        fallback(manifest, f"source {source!r} is not a folder inside the marketplace")
+        return None
+    return root
+
+
+def _plugin_roots(claude_home: Path, cwd: Path | None, errors: _ErrorLog | None = None) -> list[tuple[str, Path]]:
+    """(plugin_id, root dir) per plugin: user-scope installs when cwd is None, else installs scoped to cwd.
+
+    The root is the directory-marketplace source folder when there is one (see
+    _directory_source_root), otherwise the most recently updated install's installPath.
+    """
+    plugins = _load_json(claude_home / "plugins" / "installed_plugins.json").get("plugins")
+    if not isinstance(plugins, dict):
+        return []
+    errors = errors or _ErrorLog()
+    known = _load_json(claude_home / "plugins" / "known_marketplaces.json")
+    project = str(Path(cwd).resolve()) if cwd is not None else None
+    roots = []
+    for plugin_id, entries in sorted(plugins.items()):
+        if not isinstance(entries, list):
+            continue
+        scoped = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if project is None:
+                if entry.get("scope") != "user":
+                    continue
+            else:
+                if entry.get("scope") not in ("project", "local"):
+                    continue
+                path = entry.get("projectPath")
+                if not isinstance(path, str) or str(Path(path).resolve()) != project:
+                    continue
+            scoped.append(entry)
+        if not scoped:
+            continue
+        source_root = _directory_source_root(claude_home, plugin_id, known, errors)
+        if source_root is not None:
+            roots.append((plugin_id, source_root))
+            continue
+        best = None
+        for entry in scoped:
+            install = entry.get("installPath")
+            if not isinstance(install, str) or not Path(install).is_dir():
+                continue
+            key = _timestamp(entry.get("lastUpdated"))
+            if best is None or key > best[0]:
+                best = (key, Path(install))
+        if best:
+            roots.append((plugin_id, best[1]))
+    return roots
+
+
+def _plugin_skills(claude_home: Path, cwd: Path | None) -> list[Skill]:
+    skills = []
+    errors = _ErrorLog()
+    for plugin_id, root in _plugin_roots(claude_home, cwd, errors):
+        prefix = plugin_id.split("@", 1)[0] + ":"
+        skills.extend(_read_dir(root / "skills", "plugin", prefix, plugin_id, errors))
+    return skills
+
+
+def plugin_skills(claude_home: Path) -> list[Skill]:
+    """Skills of every installed plugin (latest user-scope install). Enablement is filtered at search time."""
+    return _plugin_skills(claude_home, None)
+
+
+def project_plugin_skills(claude_home: Path, cwd: Path) -> list[Skill]:
+    """Skills of plugins installed with project/local scope for exactly this cwd."""
+    return _plugin_skills(claude_home, cwd)
+
+
+def enabled_plugin_ids(claude_home: Path, cwd: Path) -> set[str]:
+    enabled: dict[str, bool] = {}
+    for settings in (claude_home / "settings.json",
+                     cwd / ".claude" / "settings.json",
+                     cwd / ".claude" / "settings.local.json"):
+        plugins = _load_json(settings).get("enabledPlugins")
+        if isinstance(plugins, dict):
+            enabled.update({k: v is True for k, v in plugins.items()})
+    return {k for k, v in enabled.items() if v}
+
+
+def skill_files(claude_home: Path) -> list[Path]:
+    """Global fingerprint inputs: every SKILL.md read for user/plugin skills (from each plugin's resolved
+    root, so edits in a directory marketplace's folder trigger a rebuild) plus the global JSON files."""
+    files = _skill_mds(claude_home / "skills")
+    for _, root in _plugin_roots(claude_home, None):
+        files.extend(_skill_mds(root / "skills"))
+    files += [claude_home / "settings.json", claude_home / "plugins" / "installed_plugins.json",
+              claude_home / "plugins" / "known_marketplaces.json"]
+    return files
+
+
+def project_skill_files(claude_home: Path, cwd: Path) -> list[Path]:
+    """Per-project fingerprint inputs: project and project-scoped plugin SKILL.md files plus project settings."""
+    files = _skill_mds(cwd / ".claude" / "skills")
+    for _, root in _plugin_roots(claude_home, cwd):
+        files.extend(_skill_mds(root / "skills"))
+    files += [cwd / ".claude" / "settings.json", cwd / ".claude" / "settings.local.json"]
+    return files

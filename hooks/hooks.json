@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(python3 *pick.py* save-plan *)",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/posttool.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

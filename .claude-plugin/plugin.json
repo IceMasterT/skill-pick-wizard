@@ -1,0 +1,6 @@
+{
+  "name": "skill-pick-wizard",
+  "version": "0.1.0",
+  "description": "Recommends the best installed skills for each job and keeps them in use for the whole job.",
+  "license": "MIT"
+}

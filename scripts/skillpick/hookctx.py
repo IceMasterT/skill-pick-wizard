@@ -1,0 +1,69 @@
+"""Pure text builder for the UserPromptSubmit hook (no I/O, no index access)."""
+from __future__ import annotations
+
+import json
+import re
+
+from .planview import one_line
+from .state import Config, SessionState
+
+PLUGIN_COMMANDS = ("autopick", "skill-pick", "skill-mode", "skill-deep-scan")
+
+_CMD = "(?:skill-pick-wizard:)?(?:" + "|".join(re.escape(c) for c in PLUGIN_COMMANDS) + ")"
+_COMMAND_RE = re.compile(r"/" + _CMD + r"(?=\s|$)", re.IGNORECASE)
+# Claude Code rewrites a typed slash command into <command-name>/cmd</command-name> before hooks run.
+_EXPANDED_RE = re.compile(r"<command-name>\s*/" + _CMD + r"\s*</command-name>", re.IGNORECASE)
+# A subagent's final report reaches the main session as a queued prompt that starts with this tag
+# and runs UserPromptSubmit hooks like a user message; it is not the user's message.
+_AGENT_MESSAGE_RE = re.compile(r"<agent-message\b")
+_MAX_FIELD = 200
+
+
+def _one_line(text: str) -> str:
+    """Collapse whitespace so stored text can't add lines to the injected block."""
+    flat = one_line(str(text))
+    return flat if len(flat) <= _MAX_FIELD else flat[: _MAX_FIELD - 3] + "..."
+
+
+def _is_plugin_command(prompt: str) -> bool:
+    return bool(_COMMAND_RE.match(prompt.strip()) or _EXPANDED_RE.search(prompt))
+
+
+def _is_agent_message(prompt: str) -> bool:
+    return bool(_AGENT_MESSAGE_RE.match(prompt.lstrip()))
+
+
+def build_context(
+    prompt: str, sid: str, cfg: Config, session: SessionState | None, pick_cmd: str
+) -> str | None:
+    if _is_plugin_command(prompt) or _is_agent_message(prompt):
+        return None
+    if session is not None:
+        if session.status != "planned" or not session.stages:
+            return None
+        lines = ["Skill Pick Wizard - active skill plan for this job:"]
+        for st in session.stages:
+            lines.append(f"{_one_line(st.stage)}: {', '.join(_one_line(s) for s in st.skills)}")
+        job = json.dumps(_one_line(session.job), ensure_ascii=False)
+        lines.append(
+            "Invoke each skill with the Skill tool when the work reaches its stage. "
+            "A skill already invoked in this conversation need not be invoked again. "
+            f"Use this plan only while the work matches the job {job}. "
+            "If the user starts clearly unrelated work, say in one line that /skill-pick "
+            "will pick skills for the new job, then continue."
+        )
+        return "\n".join(lines)
+    model = _one_line(cfg.deep_scan_model)
+    deep = f"on (model {model})" if cfg.deep_scan else "off"
+    return "\n".join(
+        [
+            "Skill Pick Wizard - skill scan pending.",
+            f"session: {sid}",
+            f"mode: {cfg.mode}",
+            f"deep scan: {deep}",
+            f"run with: {pick_cmd}",
+            "Invoke the skill-pick-wizard:pick-skills skill now, before any other tool call or "
+            "answer. Skip it only if this message is just a greeting, thanks, or a question you "
+            "can fully answer in one or two sentences without doing any work.",
+        ]
+    )

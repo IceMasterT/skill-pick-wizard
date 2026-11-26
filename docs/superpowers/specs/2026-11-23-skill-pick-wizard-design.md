@@ -3,6 +3,8 @@
 Date: 2026-11-23
 Status: draft, builder-checked, awaiting approval
 
+> **Rename note:** the flow skill ships as `pick-skills` (invoked as `skill-pick-wizard:pick-skills`), because a skill named `skill-pick` collided with the `/skill-pick` command. Mentions of the `skill-pick` skill below mean `pick-skills`.
+
 ## Intent
 
 The user has about 1,086 skills installed. Claude regularly uses about 3 of them; the rest are never picked, even when they fit the job.
@@ -93,6 +95,7 @@ The user picked A as the core, with B added as an optional deep scan they can to
 
 - **approve:** show the grouped list, then ask with `AskUserQuestion`: *Approve and start* / *Swap one* / *Add one*.
   - The question's four options are *Approve and start* / *Swap one* / *Add one* / *Skip for this session*.
+  - Update (2026-11-26, user decision): the fourth option is *Deep scan* (re-pick after helper agents read every skill, for this job only) until a deep scan has run for the list; then it is *Skip for this session*. Typing "skip" in "Other" always skips. Every option carries the full list as its preview, because the question dialog can hide the text above it, and the list shows one skill per line with a short reason.
   - **Swap:** a second question asks which skill to replace. If there are 4 or fewer picks they are the options; otherwise the user types the name in "Other". A third question offers that stage's 3 alternatives as options, with "Other" for a free-text search.
   - **Add:** the user types a skill name or describes what they need. Claude searches and confirms the match.
   - The question repeats until the user approves.
