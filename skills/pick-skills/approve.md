@@ -15,7 +15,12 @@ Read this only in approve mode, after showing the list (SKILL.md step 5). `<pick
 - `Approve and start`: Save this plan and start the job
 - `Swap one`: Replace or drop one skill
 - `Add one`: Add a skill by name or by need
+- `Deep scan`: Have helper agents read every installed skill, then pick again (about 30 s; type "skip" in Other to skip)
+
+When the deep scan already ran for this list (its header ends in `(deep scan)`), or it was tried this round and could not run, the fourth option is instead:
 - `Skip for this session`: Do the job without a skill plan
+
+The question dialog can hide the text above it, so give every option a `preview`: the current list exactly as shown (SKILL.md step 5 format, without the code fence). The user then sees every picked skill while choosing.
 
 Handle the answer:
 
@@ -23,9 +28,10 @@ Handle the answer:
 - **Skip for this session:** run `<pick> skip`, say in one line that skill picking is skipped for this session, then do the job without a plan. SKILL.md steps 6 and 7 do not apply.
 - **Swap one:** go to **Swap**.
 - **Add one:** go to **Add**.
-- **Text typed in "Other":** if it approves (for example "yes", "go", "looks good"), treat it as `Approve and start`. If it asks for changes (for example "drop X", "use Y instead of X", "add Z"), apply them, resolving any skill it names with **Typed text**. Additions follow the limits of SKILL.md step 4.1 (at most 8 skills, at most 4 per stage): if one would break them, say so in one line and suggest `Swap one` instead. Otherwise answer it in one line.
+- **Deep scan:** run SKILL.md step 3 for this job with the same stages; it does not change the saved setting (`/skill-deep-scan on` makes it the default). Add what it finds to each stage's candidates, then redo SKILL.md step 4 over all candidates, but keep every skill the user swapped or added in this approval. Show the new list with `(deep scan)` on its header and ask the main question again. If the deep scan could not run (SKILL.md step 3.6), keep the list as it was and ask the main question again. Save with `--deep-scan` only if it ran.
+- **Text typed in "Other":** if it says "skip" (or asks to go without skills), treat it as `Skip for this session`. If it says "deep scan" and the deep scan has not run for this list, treat it as `Deep scan`. If it approves (for example "yes", "go", "looks good"), treat it as `Approve and start`. If it asks for changes (for example "drop X", "use Y instead of X", "add Z"), apply them, resolving any skill it names with **Typed text**. Additions follow the limits of SKILL.md step 4.1 (at most 8 skills, at most 4 per stage): if one would break them, say so in one line and suggest `Swap one` instead. Otherwise answer it in one line.
 
-After every swap, add or change, and after a one-line answer, show the updated list and ask the main question again. The loop has exactly three endings: `Approve and start` (go to SKILL.md step 6), `Skip for this session` (do the job without a plan), or a declined question (save nothing, start nothing, wait for the user's next message). Every round waits for the user's answer; never answer for them.
+After every swap, add or change, and after a one-line answer, show the updated list and ask the main question again. The loop has exactly three endings: `Approve and start` (go to SKILL.md step 6), `Skip for this session` or typed "skip" (do the job without a plan), or a declined question (save nothing, start nothing, wait for the user's next message). Every round waits for the user's answer; never answer for them.
 
 ## Swap
 

@@ -17,7 +17,7 @@ SKILL = SKILL_DIR / "SKILL.md"
 APPROVE = SKILL_DIR / "approve.md"
 AGENT = REPO / "agents" / "skill-deep-scanner.md"
 COMMANDS = REPO / "commands"
-APPROVAL_OPTIONS = ("Approve and start", "Swap one", "Add one", "Skip for this session")
+APPROVAL_OPTIONS = ("Approve and start", "Swap one", "Add one", "Deep scan")
 PICK_CMD = 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pick.py"'
 MAX_HEADER = 12  # AskUserQuestion's header limit
 MAX_OPTIONS = 4  # AskUserQuestion allows 2 to 4 options plus its automatic "Other"
@@ -498,3 +498,42 @@ def test_choose_step_fills_stages_without_padding():
     assert "below 3 only when no other candidate genuinely fits any stage" in item
     assert "never pad" in item
     assert "at most 4 per stage" in item and "at most 8" in item
+
+
+def test_after_a_deep_scan_the_fourth_option_is_skip():
+    main = _section(_read(APPROVE), "## Main question", "Handle the answer:")
+    assert "`Skip for this session`: Do the job without a skill plan" in main
+    assert re.search(r"deep scan (already )?ran.*fourth option", main, re.I | re.S)
+
+
+def test_main_question_shows_the_whole_list_in_its_preview():
+    """Live run: the question dialog covered the list written above it, so the user approved blind."""
+    main = _section(_read(APPROVE), "## Main question", "Handle the answer:")
+    assert "`preview`" in main
+    assert "every option" in main
+    assert "exactly as shown" in main
+
+
+def test_list_shows_every_skill_on_its_own_line_with_why():
+    act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
+    example = act.split("```")[1]
+    skill_lines = [l for l in example.splitlines() if l.startswith("  - ")]
+    assert len(skill_lines) >= 3
+    for line in skill_lines:
+        assert re.match(r"^  - [\w:-]+: \S", line), line
+    assert not any("," in l for l in example.splitlines() if not l.startswith("Skills for:"))
+    assert "Every picked skill appears exactly once" in act
+
+
+def test_deep_scan_option_runs_step_3_and_keeps_user_changes():
+    approve = _read(APPROVE)
+    handler = next(l for l in approve.splitlines() if l.startswith("- **Deep scan:**"))
+    assert "SKILL.md step 3" in handler
+    assert "keep" in handler.lower() and ("swapped" in handler or "added" in handler)
+    assert "(deep scan)" in handler
+    assert "/skill-deep-scan" in handler  # it does not change the saved setting
+    other = next(l for l in approve.splitlines() if l.startswith('- **Text typed in "Other":**'))
+    assert '"skip"' in other and '"deep scan"' in other
+    step3 = _section(_read(SKILL), "## 3. Deep scan", "## 4.")
+    assert "approve.md" in step3
+    assert "(only when `deep_scan: on`)" not in _read(SKILL)

@@ -34,7 +34,7 @@ If you set `SKILL_PICK_WIZARD_HOME`, use that folder in the `Read` rule instead.
 
 | Mode | What happens |
 | --- | --- |
-| `approve` (default) | Shows the picked skills and asks before starting |
+| `approve` (default) | Lists the picked skills (one per line, with why) and asks: approve, swap one, add one, or deep scan (type "skip" to skip) |
 | `show` | Shows the picked skills and starts without asking |
 | `silent` | Picks and starts without showing anything |
 
@@ -49,7 +49,7 @@ If you set `SKILL_PICK_WIZARD_HOME`, use that folder in the `Read` rule instead.
 
 ## Deep scan
 
-With the deep scan on, helper agents (default model `sonnet`, 3 chunks) read every installed skill's description and report the ones that fit. It costs about 100,000 tokens per job at about 1,080 skills, so it is off by default.
+With the deep scan on, helper agents (default model `sonnet`, 3 chunks) read every installed skill's description and report the ones that fit. It costs about 100,000 tokens per job at about 1,080 skills, so it is off by default. In approve mode you can also run it for one job from the approval question (`Deep scan`) without turning it on.
 
 ## Data and configuration
 
