@@ -9,7 +9,7 @@ Most installed skills are visible to you only by name. This flow finds the ones 
 
 If this conversation already has a `Skill plan not saved` notice for the current job (step 6.7), keep following the list already shown and do not run this flow again.
 
-Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list, the questions and the one-line notices named below. The list is not commentary: in approve and show modes the user must see it. Do none of the job's own work before step 7.
+Follow the steps in order. Work through steps 0 to 6 without commentary: the user should see only the list, the questions and the one-line notices named below. The list is not commentary: when a step says to show it, the user must see it. Do none of the job's own work before step 7.
 
 ## 0. Command
 
@@ -107,7 +107,7 @@ Every picked skill appears exactly once, under its stage, in the list's order. N
 To show the list, write it as text in your reply, before the next tool call. A list that is only in a command (such as the `save-plan` JSON) or only in a command's output has not been shown: the user does not see command output. The list is a result the user needs, not narration or a restated plan: write it even when an output style asks for brevity or no narration.
 
 - **silent:** show nothing except the one-line notices from steps 3 and 6, and the list only if step 6.7 needs it. Go to step 6.
-- **show:** go straight to step 6 without asking. The list is shown there, copied from the `save-plan` output (step 6.4); showing it is required: the user sees which skills will be used.
+- **show:** go straight to step 6 without asking. Once the plan is saved, the plugin shows the list to the user itself (step 6.4).
 - **approve:** show the list, then Read `<base directory>/approve.md` with the Read tool and follow it. It ends in one of three ways: at step 6 with the approved list (saved with `--mode show` if the question tool was unavailable); with the job done without a plan (the user chose Skip; steps 6 and 7 do not apply); or stopped because the user declined a question (save nothing, start nothing, wait for the user's next message).
 
 ## 6. Save
@@ -126,24 +126,20 @@ To show the list, write it as text in your reply, before the next tool call. A l
    ```
 
    `<mode used>` is `approve`, `show` or `silent`. Add `--deep-scan` when the deep scan ran.
-4. On success it prints `saved plan: <n> stages`, a blank line, then the saved list in the step 5 format. With `--mode show` it then prints a blank line and a line starting `Show mode:` that repeats the rule below; that line is not part of the list. Then, by `<mode used>`:
-   - **show:** write that list into your reply as text, copied exactly from the output, inside a code block, before step 7. This is required, not optional: it is how the user sees which skills will be used.
-   - **silent:** do not show it.
-   - **approve:** do not repeat it: the user already saw it before approving, in step 5 and the question preview. Show it (as in show mode) only if the list changed after approval, for example because item 5 replaced or dropped a skill.
+4. On success it prints `saved plan: <n> stages`, a blank line, then the saved list in the step 5 format. In approve and show modes the plugin shows the saved list to the user itself, right after this command, so do not repeat it. In silent mode nothing is shown.
 5. If it prints `unknown skills: <list>`, replace each listed skill with an alternative of the same stage that came from the search output (those are always known), or drop it, and run `save-plan` again. Tell the user in one line only if the approved list changed. If dropping them leaves the list empty, go to item 1 instead of running `save-plan` again.
 6. If it prints an error starting with `invalid --plan`, or an argument error such as `unrecognized arguments` or `expected one argument` (usually a quoting slip), rebuild the JSON to the shape in item 2 (a non-empty list; each item has a non-empty `"stage"` string and a non-empty `"skills"` list; each skill is `{"invoke": "<invoke>", "why": "<reason>"}` with non-empty strings and no other keys), check the quoting, and run `save-plan` again.
 7. Retry at most twice in total (items 5 and 6 together). If it still fails, or it fails with any other error, the plan is not saved:
    1. Run `<pick> skip`, so the hook does not start a new skill scan on every message.
    2. If the skip worked, say in one line: `Skill plan not saved (<error>). Later messages will not show it as a reminder; run /skill-pick to try again.`
    3. If `<pick> skip` fails too, say in one line: `Skill plan not saved (<error>). Skill picking may start again on your next message.`
-   4. In silent and show modes, also show the list once (step 5 format), so the plan stays in this conversation and, in show mode, the user sees it.
+   4. In silent and show modes, also show the list once (step 5 format) as text: no plan was saved, so the plugin cannot show it, and the plan must stay in this conversation.
    5. Go on to step 7 with the final list.
 
 ## 7. Start the job
 
-1. Before the first Skill call: in show mode, and in approve mode when the list changed after approval, your reply must already contain the final list as text in a code block (step 6.4, or step 6.7 if the plan was not saved). If it does not, write it now, copied exactly from the `save-plan` output when there is one. Never make the first Skill call before the list is written.
-2. Invoke each skill of the first stage now with the Skill tool, one call per skill, using the invoke exactly as the skill name. Follow what each one says.
-3. Do the job. When the work reaches a later stage, invoke that stage's skills with the Skill tool before doing its work. Do not invoke later stages' skills up front.
-4. Invoke every planned skill when its stage starts, even if the work looks simple. Once invoked, a skill stays in effect for the rest of the job; you do not need to invoke it again. If a skill's instructions conflict with the user's request, the user's request wins.
-5. If a Skill call fails, say so in one line and carry on with the rest of the plan.
-6. Do not run this flow again for this job on your own. If the plan was saved, the hook shows it as a reminder on later messages. If it was not saved (step 6.7), the list shown in this conversation is the plan. Either way, keep following it until the job is done.
+1. Invoke each skill of the first stage now with the Skill tool, one call per skill, using the invoke exactly as the skill name. Follow what each one says.
+2. Do the job. When the work reaches a later stage, invoke that stage's skills with the Skill tool before doing its work. Do not invoke later stages' skills up front.
+3. Invoke every planned skill when its stage starts, even if the work looks simple. Once invoked, a skill stays in effect for the rest of the job; you do not need to invoke it again. If a skill's instructions conflict with the user's request, the user's request wins.
+4. If a Skill call fails, say so in one line and carry on with the rest of the plan.
+5. Do not run this flow again for this job on your own. If the plan was saved, the hook shows it as a reminder on later messages. If it was not saved (step 6.7), the list shown in this conversation is the plan. Either way, keep following it until the job is done.

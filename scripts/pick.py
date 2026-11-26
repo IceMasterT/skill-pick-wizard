@@ -15,6 +15,7 @@ from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from skillpick import catalog, service  # noqa: E402
+from skillpick.planview import one_line, plan_list  # noqa: E402
 from skillpick.paths import claude_home, data_dir  # noqa: E402
 from skillpick.state import (  # noqa: E402
     MODES,
@@ -73,30 +74,10 @@ class _Parser(argparse.ArgumentParser):
 # A reason is one short phrase ("why it fits this job in at most 8 words"); the cap keeps a runaway
 # one from flooding the list.
 MAX_WHY = 120
-# Printed after the list when the plan is saved in show mode, so the rule sits in the output Claude has
-# just read rather than only in SKILL.md, read many steps earlier. Live runs under a brevity output style
-# ("don't restate the plan", "these rules win") dropped the list as narration, so the rule says it is not.
-SHOW_MODE_RULE = (
-    "Show mode: write the list above into your reply as text, copied exactly inside a code block, "
-    "before any other tool call. The user does not see this output. The list is a result the user needs, "
-    "not narration, so an output style asking for brevity does not remove it."
-)
 
 
 def _plan_lines(state: SessionState) -> list[str]:
     return [f"{st.stage}: {', '.join(st.skills)}" for st in state.stages]
-
-
-def _plan_list(job: str, stages: list[Stage], deep_scan: bool) -> list[str]:
-    """The list the user is shown (SKILL.md step 5 format), one skill per line, every value on one line."""
-    header = f'Skills for: "{catalog.one_line(job)}"' + (" (deep scan)" if deep_scan else "")
-    lines = [header, ""]
-    for st in stages:
-        lines.append(catalog.one_line(st.stage))
-        for invoke in st.skills:
-            name, why = catalog.one_line(invoke), catalog.one_line(st.why.get(invoke, ""))
-            lines.append(f"  - {name}: {why}" if why else f"  - {name}")
-    return lines
 
 
 def _on_off(value: bool) -> str:
@@ -129,10 +110,10 @@ def cmd_search(args) -> None:
         return
     for hit in hits:
         s = hit.skill
-        tags = catalog.one_line(", ".join(s.tags))
-        matched = catalog.one_line("; ".join(hit.queries))
+        tags = one_line(", ".join(s.tags))
+        matched = one_line("; ".join(hit.queries))
         print(f"`{s.invoke}`  [{tags}]  (matched: {matched})")
-        print(f"    {catalog.one_line(s.description)}")
+        print(f"    {one_line(s.description)}")
 
 
 def _parse_plan(raw: str) -> list[Stage]:
@@ -170,7 +151,7 @@ def _parse_plan_skill(entry) -> tuple[str, str]:
     if isinstance(entry, dict) and set(entry) <= {"invoke", "why"}:
         invoke, why = entry.get("invoke"), entry.get("why", "")
         if isinstance(invoke, str) and invoke and isinstance(why, str):
-            reason = catalog.capped(catalog.one_line(why), MAX_WHY)
+            reason = catalog.capped(one_line(why), MAX_WHY)
             if reason or "why" not in entry:
                 return invoke, reason
     raise UserError(
@@ -189,15 +170,11 @@ def cmd_save_plan(args) -> None:
     unknown = list(dict.fromkeys(s for st in stages for s in st.skills if s not in known))
     if unknown:
         raise UserError(f"unknown skills: {', '.join(unknown)}")
-    mode = args.mode or cfg.mode
-    save_plan(data, sid, args.job, stages, mode, args.deep_scan)
+    save_plan(data, sid, args.job, stages, args.mode or cfg.mode, args.deep_scan)
     print(f"saved plan: {len(stages)} stages")
     print()
-    for line in _plan_list(args.job, stages, args.deep_scan):
+    for line in plan_list(args.job, stages, args.deep_scan):
         print(line)
-    if mode == "show":
-        print()
-        print(SHOW_MODE_RULE)
 
 
 def cmd_skip(args) -> None:
@@ -215,7 +192,7 @@ def cmd_show_plan(args) -> None:
     if state is None or state.status != "planned":
         print("no plan")
         return
-    for line in _plan_list(state.job, state.stages, state.deep_scan):
+    for line in plan_list(state.job, state.stages, state.deep_scan):
         print(line)
 
 

@@ -2,6 +2,7 @@
 import unicodedata
 from pathlib import Path
 
+from .planview import one_line
 from .sources import Skill
 from .state import atomic_write_text
 
@@ -16,11 +17,6 @@ MAX_TAGS = 300
 def capped(text: str, limit: int) -> str:
     """text, or its first characters ending in "..." so the result is at most limit characters."""
     return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
-
-
-def one_line(text: str) -> str:
-    """Collapse every run of whitespace (newlines included) so one skill is exactly one line."""
-    return " ".join(text.split())
 
 
 def split_chunks(skills: list[Skill], n: int = 3) -> list[list[Skill]]:

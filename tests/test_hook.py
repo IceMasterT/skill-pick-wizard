@@ -343,11 +343,12 @@ def test_fallback_log_matches_paths(env, monkeypatch, override):
     from skillpick import paths
     if not override:
         monkeypatch.delenv("SKILL_PICK_WIZARD_HOME")
-    assert hook._fallback_data_dir() == paths.data_dir()
-    assert hook._LOG_MAX_BYTES == paths.ERROR_LOG_MAX_BYTES
+    import hookio
+    assert hookio.fallback_data_dir() == paths.data_dir()
+    assert hookio.LOG_MAX_BYTES == paths.ERROR_LOG_MAX_BYTES
     log = paths.data_dir() / "errors.log"
     log.write_text("x" * (paths.ERROR_LOG_MAX_BYTES + 1), encoding="utf-8")
-    hook._fallback_log("bad \udcff\n")
+    hookio.fallback_log("bad \udcff\n")
     assert log.read_text(encoding="utf-8") == "bad \\udcff\n"
     assert (log.parent / "errors.log.1").stat().st_size == paths.ERROR_LOG_MAX_BYTES + 1
 
@@ -379,7 +380,8 @@ def test_reasons_do_not_change_the_hook_output():
     assert build_context("x", "s1", Config(), with_why, PICK) == build_context("x", "s1", Config(), bare, PICK)
 
 
-@pytest.mark.parametrize("name", ["hook.py", "skillpick/hookctx.py", "skillpick/state.py", "skillpick/paths.py"])
+@pytest.mark.parametrize("name", ["hook.py", "hookio.py", "skillpick/hookctx.py", "skillpick/state.py",
+                                  "skillpick/paths.py", "skillpick/planview.py"])
 def test_hook_side_files_parse_as_python_3_9(name):
     import ast
     src = (REPO / "scripts" / name).read_text(encoding="utf-8")

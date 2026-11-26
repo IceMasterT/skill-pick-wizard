@@ -407,26 +407,21 @@ def test_save_plan_checks_the_invoke_of_an_object_item(env, capsys):
     assert (code, err) == (2, "unknown skills: nope\n")
 
 
-def test_show_mode_save_plan_ends_with_the_copy_rule(env, capsys):
-    """Live runs: in show mode Claude read the list in this output, then went straight to the Skill calls."""
-    seed_three(env)
-    code, out, err = run(capsys, "save-plan", "--session", "s1", "--job", "add a dark mode toggle",
-                         "--plan", MIXED, "--mode", "show", "--cwd", str(env.cwd))
-    assert (code, err) == (0, "")
-    assert out == "saved plan: 2 stages\n\n" + MIXED_LIST + "\n" + pick.SHOW_MODE_RULE + "\n"
-    assert pick.SHOW_MODE_RULE.startswith("Show mode: ")
-    for words in ("into your reply as text", "copied exactly", "code block", "before any other tool call",
-                  "does not see this output", "not narration", "output style"):
-        assert words in pick.SHOW_MODE_RULE
-    run(capsys, "mode", "show")  # the saved mode counts when --mode is left out
-    assert run(capsys, "save-plan", "--session", "s2", "--job", "add a dark mode toggle", "--plan", MIXED,
-               "--cwd", str(env.cwd))[1].endswith(pick.SHOW_MODE_RULE + "\n")
-    assert pick.SHOW_MODE_RULE not in run(capsys, "show-plan", "--session", "s1")[1]
-
-
-@pytest.mark.parametrize("mode", ["approve", "silent"])
-def test_other_modes_print_only_the_list(env, capsys, mode):
+@pytest.mark.parametrize("mode", ["show", "approve", "silent"])
+def test_every_mode_prints_only_the_list(env, capsys, mode):
+    """The PostToolUse hook shows the list to the user; save-plan's output carries no extra rule line."""
     seed_three(env)
     out = run(capsys, "save-plan", "--session", "s1", "--job", "add a dark mode toggle", "--plan", MIXED,
               "--mode", mode, "--cwd", str(env.cwd))[1]
     assert out == "saved plan: 2 stages\n\n" + MIXED_LIST
+
+
+def test_one_line_and_plan_list_have_one_implementation():
+    from pathlib import Path
+    from skillpick import catalog, planview
+    assert catalog.one_line is planview.one_line
+    scripts = Path(pick.__file__).resolve().parent
+    defs = [p.name for p in scripts.rglob("*.py") if "def one_line(" in p.read_text(encoding="utf-8")
+            or "def plan_list(" in p.read_text(encoding="utf-8")]
+    assert defs == ["planview.py"]
+    assert not hasattr(pick, "SHOW_MODE_RULE") and not hasattr(pick, "_plan_list")

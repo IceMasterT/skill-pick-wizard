@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import pick
+from skillpick import planview
 from skillpick.frontmatter import parse_frontmatter
 from skillpick.hookctx import PLUGIN_COMMANDS, build_context
 from skillpick.state import Config
@@ -221,29 +222,27 @@ def test_skill_plan_json_example_gives_every_skill_its_reason():
     assert items and all(isinstance(i, dict) and set(i) == {"invoke", "why"} for i in items)
     act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
     example = act.split("```")[1].strip("\n")
-    assert "\n".join(pick._plan_list("<job summary>", pick._parse_plan(block), False)) == example
+    assert "\n".join(planview.plan_list("<job summary>", pick._parse_plan(block), False)) == example
     save = _section(_read(SKILL), "## 6. Save", "## 7.")
     assert '"why"' in save and "same words" in save
     choose = _section(_read(SKILL), "## 4. Choose", "## 5.")
     assert "why it fits" in choose
 
 
-def test_save_output_is_the_list_and_show_mode_copies_it_into_the_reply():
-    """Live run: in show mode Claude went status, search, save-plan, Skill calls and never wrote the list."""
+def test_the_plugin_shows_the_saved_list_so_claude_does_not_repeat_it():
+    """Live runs: a brevity output style made Claude skip the list, so the PostToolUse hook shows it."""
     save = _section(_read(SKILL), "## 6. Save", "## 7.")
     item = _section(save, "4. ", "\n5. ")
     assert "`saved plan: <n> stages`" in item and "step 5 format" in item
-    assert "`Show mode:`" in item and "not part of the list" in item
-    show = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **show:**"))
-    assert "copied exactly" in show and "code block" in show and "before step 7" in show
-    assert "required" in show and "not optional" in show
-    silent = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **silent:**"))
-    assert "do not" in silent.lower()
-    approve = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **approve:**"))
-    assert "preview" in approve and "changed after approval" in approve
+    assert "the plugin shows" in item and "approve and show modes" in item
+    assert "do not repeat it" in item and "silent" in item
+    for dropped in ("`Show mode:`", "copied exactly from the output", "not optional"):
+        assert dropped not in item
     act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
     show_mode = next(l for l in act.splitlines() if l.startswith("- **show:**"))
-    assert "step 6.4" in show_mode
+    assert "the plugin shows" in show_mode and "step 6.4" in show_mode
+    unsaved = _section(save, "7. Retry")
+    assert "In silent and show modes, also show the list once" in unsaved and "no plan was saved" in unsaved
 
 
 @pytest.mark.parametrize(
@@ -504,7 +503,7 @@ def test_show_and_approve_modes_must_write_the_list_as_text():
     assert "To show the list, write it as text in your reply" in act
     assert "before the next tool call" in act
     show = next(l for l in act.splitlines() if l.startswith("- **show:**"))
-    assert "required" in show and "step 6.4" in show  # shown from the save-plan output
+    assert "the plugin shows" in show and "step 6.4" in show  # shown by the PostToolUse hook
     approve = next(l for l in act.splitlines() if l.startswith("- **approve:**"))
     assert approve.startswith("- **approve:** show the list")  # before saving, as the question preview
     intro = _section(_read(SKILL), "Follow the steps in order.", "## 0.")
@@ -573,13 +572,11 @@ def test_deep_scan_option_runs_step_3_and_keeps_user_changes():
     assert "(only when `deep_scan: on`)" not in _read(SKILL)
 
 
-def test_start_step_gates_the_first_skill_call_on_the_written_list():
-    """Live run: with the list in the save-plan output, Claude still went straight to the first Skill call."""
+def test_start_step_has_no_list_gate():
+    """The list is shown by the plugin after the save, so step 7 starts straight with the Skill calls."""
     start = _section(_read(SKILL), "## 7. Start the job")
     first = next(l for l in start.splitlines() if l.startswith("1. "))
-    assert "Before the first Skill call" in first and "show mode" in first
-    assert "changed after approval" in first and "write it now" in first
-    assert first.index("Before the first Skill call") < start.index("Invoke each skill of the first stage")
+    assert first.startswith("1. Invoke each skill of the first stage now")
     act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
     assert "the user does not see command output" in act
 

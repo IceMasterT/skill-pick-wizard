@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 import traceback
 from pathlib import Path
 
-MAX_STDIN_BYTES = 8 * 1024 * 1024
+# The scripts folder goes on the path explicitly: with PYTHONSAFEPATH set, Python does not add it.
+_SCRIPTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPTS))
+
+from hookio import emit, fallback_log, read_stdin  # noqa: E402  (standard library only)
+
 CLEANUP_INTERVAL = 86400
-_PICK = Path(__file__).resolve().parent / "pick.py"
+_PICK = _SCRIPTS / "pick.py"
 
 try:  # an import failure must never make the hook exit non-zero
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from skillpick.hookctx import build_context
     from skillpick.paths import append_error_log, data_dir
     from skillpick.state import cleanup_sessions, load_config, load_session, valid_session_id
@@ -22,36 +25,6 @@ try:  # an import failure must never make the hook exit non-zero
 except BaseException:
     _IMPORTS_OK = False
     _IMPORT_ERROR = "".join(traceback.format_exc().splitlines(keepends=True)[-6:])
-
-# Standard-library-only copies of paths.data_dir() and paths.append_error_log(), used only when the
-# skillpick package itself cannot be imported (tests keep them in step with paths.py).
-_LOG_MAX_BYTES = 1024 * 1024
-
-
-def _fallback_data_dir() -> Path:
-    override = os.environ.get("SKILL_PICK_WIZARD_HOME")
-    return Path(override) if override else Path.home() / ".local" / "share" / "skill-pick-wizard"
-
-
-def _fallback_log(text: str) -> None:
-    """Append text to errors.log without the skillpick package; never raises."""
-    try:
-        import fcntl
-
-        data = _fallback_data_dir()
-        data.mkdir(parents=True, exist_ok=True, mode=0o700)
-        log = data / "errors.log"
-        with open(data / "errors.log.lock", "a") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                if log.stat().st_size > _LOG_MAX_BYTES:
-                    os.replace(log, log.with_name("errors.log.1"))
-            except FileNotFoundError:
-                pass
-            with open(log, "a", encoding="utf-8", errors="backslashreplace") as fh:
-                fh.write(text)
-    except BaseException:
-        pass
 
 
 def _log_error(data: Path | None) -> None:
@@ -81,7 +54,7 @@ def _maybe_cleanup(data: Path) -> None:
 
 def main(stdin_text: str) -> str:
     if not _IMPORTS_OK:
-        _fallback_log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} hook: import failed: {_IMPORT_ERROR}")
+        fallback_log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} hook: import failed: {_IMPORT_ERROR}")
         return ""
     data = None
     try:
@@ -106,25 +79,11 @@ def main(stdin_text: str) -> str:
         return ""
 
 
-def _emit(out: str) -> None:
-    """Write out; if stdout is closed or broken, silence it so interpreter shutdown can't fail (exit 120)."""
-    try:
-        sys.stdout.write(out)
-        sys.stdout.flush()
-    except BaseException:
-        try:
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, 1)
-        except BaseException:
-            pass
-
-
 if __name__ == "__main__":
     try:
-        raw = sys.stdin.buffer.read(MAX_STDIN_BYTES)
-        out = main(raw.decode("utf-8", errors="replace"))
+        out = main(read_stdin())
         if out:
-            _emit(out)
+            emit(out)
     except BaseException:
         pass
     sys.exit(0)

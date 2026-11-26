@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 
+from .planview import one_line
 from .state import Config, SessionState
 
 PLUGIN_COMMANDS = ("autopick", "skill-pick", "skill-mode", "skill-deep-scan")
@@ -20,7 +21,7 @@ _MAX_FIELD = 200
 
 def _one_line(text: str) -> str:
     """Collapse whitespace so stored text can't add lines to the injected block."""
-    flat = " ".join(str(text).split())
+    flat = one_line(str(text))
     return flat if len(flat) <= _MAX_FIELD else flat[: _MAX_FIELD - 3] + "..."
 
 
