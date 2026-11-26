@@ -73,6 +73,14 @@ class _Parser(argparse.ArgumentParser):
 # A reason is one short phrase ("why it fits this job in at most 8 words"); the cap keeps a runaway
 # one from flooding the list.
 MAX_WHY = 120
+# Printed after the list when the plan is saved in show mode, so the rule sits in the output Claude has
+# just read rather than only in SKILL.md, read many steps earlier. Live runs under a brevity output style
+# ("don't restate the plan", "these rules win") dropped the list as narration, so the rule says it is not.
+SHOW_MODE_RULE = (
+    "Show mode: write the list above into your reply as text, copied exactly inside a code block, "
+    "before any other tool call. The user does not see this output. The list is a result the user needs, "
+    "not narration, so an output style asking for brevity does not remove it."
+)
 
 
 def _plan_lines(state: SessionState) -> list[str]:
@@ -181,11 +189,15 @@ def cmd_save_plan(args) -> None:
     unknown = list(dict.fromkeys(s for st in stages for s in st.skills if s not in known))
     if unknown:
         raise UserError(f"unknown skills: {', '.join(unknown)}")
-    save_plan(data, sid, args.job, stages, args.mode or cfg.mode, args.deep_scan)
+    mode = args.mode or cfg.mode
+    save_plan(data, sid, args.job, stages, mode, args.deep_scan)
     print(f"saved plan: {len(stages)} stages")
     print()
     for line in _plan_list(args.job, stages, args.deep_scan):
         print(line)
+    if mode == "show":
+        print()
+        print(SHOW_MODE_RULE)
 
 
 def cmd_skip(args) -> None:

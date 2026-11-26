@@ -233,6 +233,7 @@ def test_save_output_is_the_list_and_show_mode_copies_it_into_the_reply():
     save = _section(_read(SKILL), "## 6. Save", "## 7.")
     item = _section(save, "4. ", "\n5. ")
     assert "`saved plan: <n> stages`" in item and "step 5 format" in item
+    assert "`Show mode:`" in item and "not part of the list" in item
     show = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **show:**"))
     assert "copied exactly" in show and "code block" in show and "before step 7" in show
     assert "required" in show and "not optional" in show
@@ -570,3 +571,22 @@ def test_deep_scan_option_runs_step_3_and_keeps_user_changes():
     step3 = _section(_read(SKILL), "## 3. Deep scan", "## 4.")
     assert "approve.md" in step3
     assert "(only when `deep_scan: on`)" not in _read(SKILL)
+
+
+def test_start_step_gates_the_first_skill_call_on_the_written_list():
+    """Live run: with the list in the save-plan output, Claude still went straight to the first Skill call."""
+    start = _section(_read(SKILL), "## 7. Start the job")
+    first = next(l for l in start.splitlines() if l.startswith("1. "))
+    assert "Before the first Skill call" in first and "show mode" in first
+    assert "changed after approval" in first and "write it now" in first
+    assert first.index("Before the first Skill call") < start.index("Invoke each skill of the first stage")
+    act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
+    assert "the user does not see command output" in act
+
+
+def test_list_is_a_result_that_brevity_output_styles_do_not_remove():
+    """Live runs: a Concise output style ("don't restate the plan", "these rules win") made Claude drop the list."""
+    rule = next(l for l in _section(_read(SKILL), "## 5. Act by mode", "## 6.").splitlines()
+                if l.startswith("To show the list"))
+    assert "a result the user needs, not narration" in rule
+    assert "output style" in rule and "brevity" in rule
