@@ -316,3 +316,41 @@ def test_load_config_rejects_unsafe_model(tmp_path):
         assert load_config(tmp_path).deep_scan_model == "sonnet"
     (tmp_path / "config.json").write_text(json.dumps({"deep_scan_model": "claude-opus_4.5:x"}))
     assert load_config(tmp_path).deep_scan_model == "claude-opus_4.5:x"
+
+
+def test_plan_roundtrip_keeps_each_stage_reasons(env):
+    stages = [Stage("Planning", ["a", "b"], {"a": "explore first"}), Stage("Building", ["c"])]
+    save_plan(env.data, "s1", "j", stages, "show", False)
+    loaded = load_session(env.data, "s1").stages
+    assert loaded == stages
+    assert loaded[1].why == {}
+    raw = json.loads((env.data / "sessions" / "s1.json").read_text(encoding="utf-8"))
+    assert raw["stages"][0]["why"] == {"a": "explore first"}
+
+
+def test_session_without_reasons_still_loads(env):
+    """Session files written before reasons existed have no "why" key."""
+    (env.data / "sessions").mkdir(parents=True)
+    (env.data / "sessions" / "s1.json").write_text(json.dumps({
+        "status": "planned", "job": "j", "stages": [{"stage": "Planning", "skills": ["a", "b"]}],
+        "mode": "approve", "deep_scan": False, "updated": 1.0,
+    }), encoding="utf-8")
+    s = load_session(env.data, "s1")
+    assert s.stages == [Stage("Planning", ["a", "b"])] and s.stages[0].why == {}
+
+
+@pytest.mark.parametrize("why, expected", [
+    (None, {}),
+    ("x", {}),
+    ([["a", "r"]], {}),
+    ({"a": 5, "b": "ok"}, {"b": "ok"}),
+    ({"a": "ok", "ghost": "not planned"}, {"a": "ok"}),
+    ({"a": ["r"]}, {}),
+])
+def test_bad_reasons_are_dropped_without_losing_the_stage(env, why, expected):
+    (env.data / "sessions").mkdir(parents=True)
+    (env.data / "sessions" / "s1.json").write_text(json.dumps({
+        "status": "planned", "stages": [{"stage": "P", "skills": ["a", "b"], "why": why}],
+    }), encoding="utf-8")
+    [stage] = load_session(env.data, "s1").stages
+    assert stage.skills == ["a", "b"] and stage.why == expected

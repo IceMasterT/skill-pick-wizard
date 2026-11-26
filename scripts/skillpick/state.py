@@ -34,6 +34,8 @@ class Config:
 class Stage:
     stage: str
     skills: list[str]
+    # invoke -> why it fits the job, for skills given a reason; the hook reads only `skills`.
+    why: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -137,8 +139,15 @@ def _parse_stages(raw) -> list[Stage]:
         if isinstance(name, str) and isinstance(skills, list) and all(
             isinstance(s, str) for s in skills
         ):
-            stages.append(Stage(name, list(skills)))
+            stages.append(Stage(name, list(skills), _parse_why(item.get("why"), skills)))
     return stages
+
+
+def _parse_why(raw, skills: list[str]) -> dict[str, str]:
+    """Reasons for this stage's skills; anything else (absent in older files, wrong-typed) is dropped."""
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in skills and isinstance(v, str)}
 
 
 def _finite_float(value) -> float:

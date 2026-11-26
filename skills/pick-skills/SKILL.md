@@ -82,9 +82,10 @@ Run this step when `status` printed `deep_scan: on`, or when the user chooses `D
 2. Choose by what each skill does: a skill goes in a stage only if it does the work of that stage. For search candidates, judge by the full description. For candidates that only the deep scan found, judge by the agent's reason line, since their full description is not in front of you.
 3. Prefer a skill made for the job's stack or domain over a generic one. Never pick two skills that do the same thing. General workflow skills (planning, test-driven development, debugging, verification, code review) count when the job includes that work.
 4. Give every stage at least one skill. Drop a stage that no candidate fits.
-5. Every unpicked candidate is an alternative. For each stage, keep the next 3 best-fitting unpicked candidates as its swap alternatives.
-6. Write the job summary: the job in at most 10 words, in the user's terms.
-7. If no candidate fits the job at all, say so in one line, run `<pick> skip`, and do the job without a plan. Steps 5 to 7 do not apply.
+5. For each pick, write why it fits this job in at most 8 words. The list (step 5) and the plan JSON (step 6) use the same words.
+6. Every unpicked candidate is an alternative. For each stage, keep the next 3 best-fitting unpicked candidates as its swap alternatives.
+7. Write the job summary: the job in at most 10 words, in the user's terms.
+8. If no candidate fits the job at all, say so in one line, run `<pick> skip`, and do the job without a plan. Steps 5 to 7 do not apply.
 
 ## 5. Act by mode
 
@@ -103,19 +104,19 @@ Building
 
 Every picked skill appears exactly once, under its stage, in the list's order. Never join skills on one line, shorten an invoke, or leave a skill out. Append ` (deep scan)` to the header line when the deep scan ran: `Skills for: "<job summary>" (deep scan)`.
 
-To show the list, write it as text in your reply, before the next tool call. A list that is only in a command (such as the `save-plan` JSON) has not been shown.
+To show the list, write it as text in your reply, before the next tool call. A list that is only in a command (such as the `save-plan` JSON) or only in a command's output has not been shown.
 
 - **silent:** show nothing except the one-line notices from steps 3 and 6, and the list only if step 6.7 needs it. Go to step 6.
-- **show:** show the list (required: the user sees which skills will be used), then go straight to step 6 without asking.
+- **show:** go straight to step 6 without asking. The list is shown there, copied from the `save-plan` output (step 6.4); showing it is required: the user sees which skills will be used.
 - **approve:** show the list, then Read `<base directory>/approve.md` with the Read tool and follow it. It ends in one of three ways: at step 6 with the approved list (saved with `--mode show` if the question tool was unavailable); with the job done without a plan (the user chose Skip; steps 6 and 7 do not apply); or stopped because the user declined a question (save nothing, start nothing, wait for the user's next message).
 
 ## 6. Save
 
 1. If the final list has no skills (the user removed them all), run `<pick> skip` and do the job without a plan. The rest of steps 6 and 7 do not apply.
-2. Build the plan JSON from the final list, stages in work order, leaving out empty stages:
+2. Build the plan JSON from the final list, stages in work order, leaving out empty stages. Give each skill as `{"invoke": "<invoke>", "why": "<reason>"}`, with the same words as its reason in the list:
 
    ```
-   [{"stage": "Planning", "skills": ["brainstorming", "writing-plans"]}, {"stage": "Building", "skills": ["test-driven-development"]}]
+   [{"stage": "Planning", "skills": [{"invoke": "brainstorming", "why": "explore the idea before building"}, {"invoke": "writing-plans", "why": "turn the design into steps"}]}, {"stage": "Building", "skills": [{"invoke": "test-driven-development", "why": "write each failing test first"}, {"invoke": "frontend-ui-engineering", "why": "build the checkout page UI"}]}]
    ```
 
 3. Run:
@@ -125,14 +126,17 @@ To show the list, write it as text in your reply, before the next tool call. A l
    ```
 
    `<mode used>` is `approve`, `show` or `silent`. Add `--deep-scan` when the deep scan ran.
-4. It prints `saved plan: <n> stages` on success.
+4. On success it prints `saved plan: <n> stages`, a blank line, then the saved list in the step 5 format. Then, by the mode for this job (step 0.5):
+   - **show:** write that list into your reply as text, copied exactly from the output, inside a code block, before step 7. This is required, not optional: it is how the user sees which skills will be used.
+   - **silent:** do not show it.
+   - **approve:** do not repeat it: the user already saw it before approving, in step 5 and the question preview. Show it (as in show mode) only if the list changed after approval, for example because item 5 replaced or dropped a skill.
 5. If it prints `unknown skills: <list>`, replace each listed skill with an alternative of the same stage that came from the search output (those are always known), or drop it, and run `save-plan` again. Tell the user in one line only if the approved list changed. If dropping them leaves the list empty, go to item 1 instead of running `save-plan` again.
-6. If it prints an error starting with `invalid --plan`, or an argument error such as `unrecognized arguments` or `expected one argument` (usually a quoting slip), rebuild the JSON to the shape in item 2 (a non-empty list; each item has a non-empty `"stage"` string and a non-empty `"skills"` list of strings), check the quoting, and run `save-plan` again.
+6. If it prints an error starting with `invalid --plan`, or an argument error such as `unrecognized arguments` or `expected one argument` (usually a quoting slip), rebuild the JSON to the shape in item 2 (a non-empty list; each item has a non-empty `"stage"` string and a non-empty `"skills"` list; each skill is `{"invoke": "<invoke>", "why": "<reason>"}` with non-empty strings and no other keys), check the quoting, and run `save-plan` again.
 7. Retry at most twice in total (items 5 and 6 together). If it still fails, or it fails with any other error, the plan is not saved:
    1. Run `<pick> skip`, so the hook does not start a new skill scan on every message.
    2. If the skip worked, say in one line: `Skill plan not saved (<error>). Later messages will not show it as a reminder; run /skill-pick to try again.`
    3. If `<pick> skip` fails too, say in one line: `Skill plan not saved (<error>). Skill picking may start again on your next message.`
-   4. In silent mode, also show the list once (step 5 format), so the plan stays in this conversation.
+   4. In silent and show modes, also show the list once (step 5 format), so the plan stays in this conversation and, in show mode, the user sees it.
    5. Go on to step 7 with the final list.
 
 ## 7. Start the job

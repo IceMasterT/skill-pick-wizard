@@ -13,7 +13,8 @@ MAX_DESCRIPTION = 1500
 MAX_TAGS = 300
 
 
-def _capped(text: str, limit: int) -> str:
+def capped(text: str, limit: int) -> str:
+    """text, or its first characters ending in "..." so the result is at most limit characters."""
     return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
@@ -47,8 +48,8 @@ def copyable(invoke: str) -> bool:
 def format_line(skill: Skill) -> str:
     if not copyable(skill.invoke):
         raise ValueError(f"invoke cannot be written to a catalog line: {skill.invoke!r}")
-    tags = _capped(one_line(", ".join(skill.tags)), MAX_TAGS)
-    description = _capped(one_line(skill.description), MAX_DESCRIPTION)
+    tags = capped(one_line(", ".join(skill.tags)), MAX_TAGS)
+    description = capped(one_line(skill.description), MAX_DESCRIPTION)
     return f"- `{skill.invoke}` [{tags}]: {description}"
 
 

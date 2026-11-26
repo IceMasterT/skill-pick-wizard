@@ -70,8 +70,25 @@ class _Parser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: error: {message}\n")
 
 
+# A reason is one short phrase ("why it fits this job in at most 8 words"); the cap keeps a runaway
+# one from flooding the list.
+MAX_WHY = 120
+
+
 def _plan_lines(state: SessionState) -> list[str]:
     return [f"{st.stage}: {', '.join(st.skills)}" for st in state.stages]
+
+
+def _plan_list(job: str, stages: list[Stage], deep_scan: bool) -> list[str]:
+    """The list the user is shown (SKILL.md step 5 format), one skill per line, every value on one line."""
+    header = f'Skills for: "{catalog.one_line(job)}"' + (" (deep scan)" if deep_scan else "")
+    lines = [header, ""]
+    for st in stages:
+        lines.append(catalog.one_line(st.stage))
+        for invoke in st.skills:
+            name, why = catalog.one_line(invoke), catalog.one_line(st.why.get(invoke, ""))
+            lines.append(f"  - {name}: {why}" if why else f"  - {name}")
+    return lines
 
 
 def _on_off(value: bool) -> str:
@@ -117,7 +134,7 @@ def _parse_plan(raw: str) -> list[Stage]:
         raise UserError("invalid --plan JSON") from None
     if not isinstance(plan, list) or not plan:
         raise UserError("invalid --plan: expected a non-empty JSON list")
-    shape = 'invalid --plan: each item needs a non-empty "stage" (string) and a non-empty "skills" (list of strings)'
+    shape = 'invalid --plan: each item needs a non-empty "stage" (string) and a non-empty "skills" (list)'
     stages = []
     for item in plan:
         if not (
@@ -126,11 +143,32 @@ def _parse_plan(raw: str) -> list[Stage]:
             and isinstance(item.get("skills"), list)
             and item["stage"].strip()
             and item["skills"]
-            and all(isinstance(s, str) and s for s in item["skills"])
         ):
             raise UserError(shape)
-        stages.append(Stage(item["stage"], list(item["skills"])))
+        skills, why = [], {}
+        for entry in item["skills"]:
+            invoke, reason = _parse_plan_skill(entry)
+            skills.append(invoke)
+            if reason:
+                why[invoke] = reason
+        stages.append(Stage(item["stage"], skills, why))
     return stages
+
+
+def _parse_plan_skill(entry) -> tuple[str, str]:
+    """(invoke, reason) from a plan skill: an invoke string (no reason) or {"invoke": ..., "why": ...}."""
+    if isinstance(entry, str) and entry:
+        return entry, ""
+    if isinstance(entry, dict) and set(entry) <= {"invoke", "why"}:
+        invoke, why = entry.get("invoke"), entry.get("why", "")
+        if isinstance(invoke, str) and invoke and isinstance(why, str):
+            reason = catalog.capped(catalog.one_line(why), MAX_WHY)
+            if reason or "why" not in entry:
+                return invoke, reason
+    raise UserError(
+        'invalid --plan: each skill is a non-empty invoke string or '
+        '{"invoke": "<invoke>", "why": "<reason>"} with non-empty strings'
+    )
 
 
 def cmd_save_plan(args) -> None:
@@ -145,6 +183,9 @@ def cmd_save_plan(args) -> None:
         raise UserError(f"unknown skills: {', '.join(unknown)}")
     save_plan(data, sid, args.job, stages, args.mode or cfg.mode, args.deep_scan)
     print(f"saved plan: {len(stages)} stages")
+    print()
+    for line in _plan_list(args.job, stages, args.deep_scan):
+        print(line)
 
 
 def cmd_skip(args) -> None:
@@ -162,9 +203,7 @@ def cmd_show_plan(args) -> None:
     if state is None or state.status != "planned":
         print("no plan")
         return
-    if state.job:
-        print(f"job: {state.job}")
-    for line in _plan_lines(state):
+    for line in _plan_list(state.job, state.stages, state.deep_scan):
         print(line)
 
 

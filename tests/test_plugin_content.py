@@ -214,6 +214,37 @@ def test_skill_plan_json_example_is_accepted_by_save_plan():
         assert stages and all(st.skills for st in stages)
 
 
+def test_skill_plan_json_example_gives_every_skill_its_reason():
+    """The example teaches the object form, and save-plan renders it back into step 5's example list."""
+    [block] = re.findall(r"```\n\s*(\[\{.*?\}\])\n\s*```", _read(SKILL), re.S)
+    items = [item for stage in json.loads(block) for item in stage["skills"]]
+    assert items and all(isinstance(i, dict) and set(i) == {"invoke", "why"} for i in items)
+    act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
+    example = act.split("```")[1].strip("\n")
+    assert "\n".join(pick._plan_list("<job summary>", pick._parse_plan(block), False)) == example
+    save = _section(_read(SKILL), "## 6. Save", "## 7.")
+    assert '"why"' in save and "same words" in save
+    choose = _section(_read(SKILL), "## 4. Choose", "## 5.")
+    assert "why it fits" in choose
+
+
+def test_save_output_is_the_list_and_show_mode_copies_it_into_the_reply():
+    """Live run: in show mode Claude went status, search, save-plan, Skill calls and never wrote the list."""
+    save = _section(_read(SKILL), "## 6. Save", "## 7.")
+    item = _section(save, "4. ", "\n5. ")
+    assert "`saved plan: <n> stages`" in item and "step 5 format" in item
+    show = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **show:**"))
+    assert "copied exactly" in show and "code block" in show and "before step 7" in show
+    assert "required" in show and "not optional" in show
+    silent = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **silent:**"))
+    assert "do not" in silent.lower()
+    approve = next(l.strip() for l in item.splitlines() if l.strip().startswith("- **approve:**"))
+    assert "preview" in approve and "changed after approval" in approve
+    act = _section(_read(SKILL), "## 5. Act by mode", "## 6.")
+    show_mode = next(l for l in act.splitlines() if l.startswith("- **show:**"))
+    assert "step 6.4" in show_mode
+
+
 @pytest.mark.parametrize(
     "name, line",
     [
@@ -336,7 +367,7 @@ def test_unsaved_plan_path_is_explicit():
     save = _section(_read(SKILL), "## 6. Save", "## 7.")
     assert "/skill-pick to try again" in save  # reminders will not appear; how to retry
     assert "If `<pick> skip` fails too" in save
-    assert re.search(r"In silent mode, also show the list once", save)
+    assert re.search(r"In silent and show modes, also show the list once", save)
     start = _section(_read(SKILL), "## 7.")
     assert "On later messages the hook shows the plan as a reminder" not in start
     assert "If the plan was saved" in start and "not saved" in start
@@ -472,7 +503,9 @@ def test_show_and_approve_modes_must_write_the_list_as_text():
     assert "To show the list, write it as text in your reply" in act
     assert "before the next tool call" in act
     show = next(l for l in act.splitlines() if l.startswith("- **show:**"))
-    assert "show the list" in show and "required" in show
+    assert "required" in show and "step 6.4" in show  # shown from the save-plan output
+    approve = next(l for l in act.splitlines() if l.startswith("- **approve:**"))
+    assert approve.startswith("- **approve:** show the list")  # before saving, as the question preview
     intro = _section(_read(SKILL), "Follow the steps in order.", "## 0.")
     assert "The list is not commentary" in intro
 
